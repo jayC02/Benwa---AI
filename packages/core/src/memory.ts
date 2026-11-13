@@ -16,8 +16,20 @@ export async function retrieveMemory(
         }
       : {},
     orderBy: { createdAt: "desc" },
-    take: 100,
+    take: 60,
   });
+  const checkpoints = await db.memory.findMany({
+    where: {
+      ...(projectId ? { projectId } : {}),
+      category: { in: ["project", "self-model", "episodic"] },
+      importance: { gte: 0.8 },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 40,
+  });
+  for (const memory of checkpoints)
+    if (!candidates.some((candidate) => candidate.id === memory.id))
+      candidates.push(memory);
   const superseded = new Set(
     candidates.map((m) => m.supersedesId).filter(Boolean),
   );
@@ -38,7 +50,7 @@ export async function retrieveMemory(
     .slice(0, 8)
     .map(({ m }) => m);
 }
-export async function consolidateMemory() {
+export async function consolidateMemory(allowModelSummary = true) {
   const actions = await db.action.findMany({
     orderBy: { createdAt: "desc" },
     take: 30,
@@ -61,7 +73,7 @@ export async function consolidateMemory() {
     },
   });
   // Keep the deterministic self-model authoritative; optional prose is a separate belief.
-  if (env.LLM_PROVIDER === "gemini" && env.GEMINI_EXPERIMENTAL_GEMMA) {
+  if (allowModelSummary && env.LLM_PROVIDER === "gemini") {
     const mode = await db.agentConfiguration.findUniqueOrThrow({
       where: { id: "main" },
     });

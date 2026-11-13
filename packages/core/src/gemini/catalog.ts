@@ -24,8 +24,10 @@ export interface ModelSpec {
   experimental?: boolean;
   note?: string;
   probeThinking?: "minimal" | "low";
+  inputTokenLimit?: number;
 }
 export const routingPolicy = {
+  probeProtocol: "native-action-v2",
   maximumAttempts: 3,
   invalidCooldownMs: 5 * 60000,
   probeRetryBaseMs: 15 * 60000,
@@ -33,6 +35,15 @@ export const routingPolicy = {
   maximumAutomaticProbeFailures: 4,
   performanceSamplesPerModel: 20,
 } as const;
+// Keep historical model records for accounting; only these IDs may make new calls.
+export const enabledActionModels = new Set([
+  "gemini-3.8-flash",
+  "gemini-4-hydrogen",
+  "gemini-3.5-flash-lite",
+]);
+export const modelEnabled = (id: string) => enabledActionModels.has(id);
+export const modelOutputLimit = (id: string) =>
+  Math.min(env.LLM_MAX_OUTPUT_TOKENS, id === "gemini-4-hydrogen" ? 6000 : 2400);
 const lite: Limits = { rpm: 15, tpm: 250000, rpd: 500 },
   flash: Limits = { rpm: 5, tpm: 250000, rpd: 20 },
   gemma: Limits = { rpm: 30, tpm: 16000, rpd: 14400 };
@@ -42,6 +53,7 @@ const agent: Capability[] = ["tools", "structured", "text"];
 export const modelCatalog: readonly ModelSpec[] = [
   {
     id: "gemini-3.5-flash-lite",
+    inputTokenLimit: 1048576, // Verified via models.get, 2026-11-13; separate from local quota/budget.
     probeThinking: "minimal",
     label: "Gemini 3.5 Flash-Lite",
     tier: 1,
@@ -64,6 +76,7 @@ export const modelCatalog: readonly ModelSpec[] = [
   },
   {
     id: "gemini-3.8-flash",
+    inputTokenLimit: 1048576,
     probeThinking: "low",
     label: "Gemini 3.8 Flash",
     tier: 2,
@@ -86,12 +99,13 @@ export const modelCatalog: readonly ModelSpec[] = [
   },
   {
     id: "gemini-4-hydrogen",
+    inputTokenLimit: 1048576,
     probeThinking: "low",
     label: "Gemini 4 Hydrogen",
     tier: 3,
     capabilities: agent,
     limits: flash,
-    reserve: 5,
+    reserve: 0,
     groups: ["generation-project"],
     freeStandard: true,
   },

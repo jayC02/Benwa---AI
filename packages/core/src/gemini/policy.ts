@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { AgentContext } from "../provider.js";
-import type { Capability, ModelSpec } from "./catalog.js";
+import { modelEnabled, type Capability, type ModelSpec } from "./catalog.js";
 export interface RoutingTask {
   kind:
     | "routine"
@@ -39,7 +39,9 @@ export function classifyTask(context: AgentContext): RoutingTask {
     .join(" ")
     .toLowerCase();
   const infrastructure =
-    (context.capabilities?.sandbox === false && project?.stage === "TESTING") ||
+    (context.capabilities?.sandbox === false &&
+      context.capabilities.browser !== true &&
+      project?.stage === "TESTING") ||
     /sandbox unavailable|install docker|enoent|eacces|permission|not configured|http 40[13]|http 429|quota|dns|timed out|network/.test(
       observations,
     );
@@ -57,17 +59,21 @@ export function classifyTask(context: AgentContext): RoutingTask {
   const blocked = context.restrictions.some(
     (r) => Number(object(r).level) >= 2 && object(r).projectId === project?.id,
   );
-  const tier = infrastructure
-    ? 1
-    : complex || (reasoning && blocked)
-      ? 3
-      : reasoning ||
-          (!lightweight &&
-            ["BUILDING", "TESTING", "PLANNING", "REVENUE_EVALUATION"].includes(
-              project?.stage ?? "",
-            ))
-        ? 2
-        : 1;
+  const tier =
+    infrastructure || (lightweight && !reasoning)
+      ? 1
+      : complex || (reasoning && blocked)
+        ? 3
+        : reasoning ||
+            (!lightweight &&
+              [
+                "BUILDING",
+                "TESTING",
+                "PLANNING",
+                "REVENUE_EVALUATION",
+              ].includes(project?.stage ?? ""))
+          ? 2
+          : 2;
   return {
     kind: reasoning
       ? "debug"
@@ -103,17 +109,17 @@ export function rankCandidates(
   models: ModelSpec[],
   performance: Map<string, { successes: number; failures: number }>,
   experimental = false,
+  inputEstimate = 0,
 ) {
   return models
     .filter(
       (m) =>
+        modelEnabled(m.id) &&
         m.freeStandard &&
+        (m.inputTokenLimit ?? 0) >= inputEstimate &&
         task.required.every((c) => m.capabilities.includes(c)) &&
         (!m.expiresAt || new Date(m.expiresAt) > new Date()) &&
-        (!m.experimental || (experimental && task.kind === "summary")) &&
-        (m.tier <= task.tier ||
-          (task.tier === 1 && task.kind !== "summary" && m.tier === 2) ||
-          (m.tier === 4 && experimental && task.kind === "summary")),
+        (!m.experimental || (experimental && task.kind === "summary")),
     )
     .sort((a, b) => {
       const score = (m: ModelSpec) => {
@@ -129,6 +135,23 @@ export function rankCandidates(
       };
       return score(a) - score(b);
     });
+}
+export function hydrogenReviewDue(
+  used: number,
+  lastRequest: Date | undefined,
+  limit: number,
+  now = new Date(),
+) {
+  const remaining = limit - used;
+  if (remaining <= 0) return false;
+  return (
+    !lastRequest ||
+    now.getTime() - lastRequest.getTime() >=
+      Math.max(
+        60000,
+        (nextPacificReset(now).getTime() - now.getTime()) / remaining,
+      )
+  );
 }
 export function pacificDay(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {

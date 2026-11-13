@@ -1,5 +1,6 @@
 import { db, financialSummary, env, modelMonitor } from "@benwa/core";
 import { ROOM_IDS, ROOMS, type RoomId } from "../world/rooms";
+import { readSkillRatings } from "../../../../packages/core/src/skills";
 const historySelect = {
   id: true,
   cycleId: true,
@@ -150,7 +151,7 @@ export async function snapshot() {
     })),
   }));
   return {
-    creature,
+    creature: { ...creature, skills: readSkillRatings(creature.skills) },
     configuration,
     projects,
     actions,
@@ -170,7 +171,10 @@ export async function snapshot() {
       env.LLM_PROVIDER === "gemini" ? env.GEMINI_API_KEY : env.LLM_API_KEY,
     ),
     searchConfigured:
-      env.SEARCH_PROVIDER === "public" || Boolean(env.BRAVE_SEARCH_KEY),
+      env.SEARCH_PROVIDER === "public" ||
+      (env.SEARCH_PROVIDER === "langsearch"
+        ? Boolean(env.LANGSEARCH_API_KEY)
+        : Boolean(env.BRAVE_SEARCH_KEY)),
     searchProvider: env.SEARCH_PROVIDER,
     webAccess: env.RESEARCH_HOSTS.split(",").some((host) => host.trim() === "*")
       ? "public"

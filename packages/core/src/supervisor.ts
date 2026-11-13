@@ -58,6 +58,14 @@ export function assessRepetition(
   history: History[],
 ) {
   const recent = history.slice(0, 12);
+  if (candidate.tool === "research.search") {
+    let searches = 0;
+    for (const item of recent) {
+      if (item.tool !== "research.search" && item.meaningful) break;
+      if (item.tool === "research.search") searches++;
+    }
+    if (searches >= 3) return { stagnant: searches, level: 2, blocked: true };
+  }
   let stagnant = 0;
   for (const h of recent) {
     // A verified productive result breaks a stagnant sequence, even with the same tool.

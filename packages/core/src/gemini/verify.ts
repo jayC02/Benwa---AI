@@ -5,6 +5,7 @@ import {
   freeProjectGuard,
   routingConfiguration,
   routingPolicy,
+  modelEnabled,
 } from "./catalog.js";
 import {
   reserveModelRequest,
@@ -29,7 +30,7 @@ export const probeTask: RoutingTask = {
   tier: 1,
   important: false,
   required: ["tools", "structured"],
-  reason: "Bounded access/capability probe; no execution tools run.",
+  reason: `${routingPolicy.probeProtocol}: bounded access/capability probe; no execution tools run.`,
 };
 export const probeRetryDelay = (failures: number) =>
   Math.min(
@@ -70,7 +71,7 @@ export async function verifyModels(
     inferenceAttempted: boolean;
   }[] = [];
   for (const model of routingConfiguration().models.filter(
-    (m) => !ids || ids.includes(m.id),
+    (m) => modelEnabled(m.id) && (!ids || ids.includes(m.id)),
   )) {
     const where = {
       scope_modelId: { scope: env.GEMINI_PROJECT_ID, modelId: model.id },
@@ -131,7 +132,7 @@ export async function verifyModels(
         throw new Error("Metadata does not advertise generateContent");
       const wire = {
         ...probeDecision,
-        input: JSON.stringify(probeDecision.input),
+        input: probeDecision.input,
       };
       const payload = geminiPayload({
         state: { name: "Benwa" },
@@ -288,7 +289,7 @@ export async function verifyModels(
               e instanceof GeminiFailure
                 ? e.message
                 : e instanceof ProviderWaitError
-                  ? "Probe deferred"
+                  ? (prior?.error ?? "Probe deferred")
                   : decisionFailureReason(e, observedOutput),
           },
         });
@@ -344,6 +345,7 @@ export async function refreshTemporaryModelAccess(
   });
   for (const model of routingConfiguration().models) {
     if (
+      !modelEnabled(model.id) ||
       !model.freeStandard ||
       model.experimental ||
       !model.capabilities.includes("structured") ||
@@ -370,13 +372,16 @@ export async function refreshTemporaryModelAccess(
       orderBy: { createdAt: "desc" },
       take: 10,
     });
-    const successIndex = probes.findIndex((row) => row.status === "SUCCEEDED");
-    const failures = successIndex < 0 ? probes.length : successIndex;
-    if (failures >= routingPolicy.maximumAutomaticProbeFailures) continue;
-    const checkedAt = Math.max(
-      record.metadataAt?.getTime() ?? 0,
-      probes[0]?.createdAt.getTime() ?? 0,
+    const currentProtocol = probes.filter((row) =>
+      row.reason.startsWith(routingPolicy.probeProtocol),
     );
+    const successIndex = currentProtocol.findIndex(
+      (row) => row.status === "SUCCEEDED",
+    );
+    const failures = successIndex < 0 ? currentProtocol.length : successIndex;
+    if (failures >= routingPolicy.maximumAutomaticProbeFailures) continue;
+    const checkedAt =
+      probes[0]?.createdAt.getTime() ?? record.metadataAt?.getTime() ?? 0;
     if (now.getTime() - checkedAt < probeRetryDelay(failures)) continue;
     const [result] = await verifyModels(true, [model.id], transport);
     return result?.inferenceAttempted ?? false;

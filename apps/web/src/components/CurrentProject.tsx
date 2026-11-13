@@ -102,7 +102,7 @@ export default function CurrentProject({
                     {BADGE_LABEL[badge]}
                   </span>
                   <span>{a.outcome?.summary ?? a.intention}</span>
-                  <time>{ago(a.createdAt)}</time>
+                  <time>{ago(a.createdAt, Date.parse(s.serverTime))}</time>
                 </li>
               ))}
             </ul>

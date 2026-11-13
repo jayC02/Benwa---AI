@@ -18,6 +18,7 @@ model CreatureState {
   boredom Float @default(12)
   confidence Float @default(50)
   frustration Float @default(5)
+  skills Json @default("{}")
   heartbeat DateTime?
   restUntil DateTime?
   restStartedAt DateTime?
@@ -311,4 +312,17 @@ model ScheduledJob {
   error String?
   createdAt DateTime @default(now())
   @@index([status,runAt])
+}
+
+model ResearchUsage {
+  id String @id @default(cuid())
+  provider String
+  period String
+  requests Int @default(0)
+  tokens Int @default(0)
+  credits Int @default(0)
+  cooldownUntil DateTime?
+  lastRequestAt DateTime?
+  error String?
+  @@unique([provider,period])
 }

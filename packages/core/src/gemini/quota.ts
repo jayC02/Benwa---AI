@@ -6,6 +6,7 @@ import {
   freeProjectGuard,
   routingConfiguration,
   type Limits,
+  modelEnabled,
 } from "./catalog.js";
 import { pacificDay, nextPacificReset, type RoutingTask } from "./policy.js";
 export const credentialFingerprint = () => digest(env.GEMINI_API_KEY);
@@ -25,6 +26,7 @@ export async function reserveModelRequest(input: {
   const configuration = routingConfiguration(),
     model = configuration.models.find((m) => m.id === input.modelId);
   if (
+    !modelEnabled(input.modelId) ||
     !model?.freeStandard ||
     (model.expiresAt && new Date(model.expiresAt) <= now)
   )
@@ -33,6 +35,8 @@ export async function reserveModelRequest(input: {
     !Number.isSafeInteger(input.estimatedInput) ||
     input.estimatedInput < 1 ||
     input.estimatedInput > env.LLM_MAX_INPUT_TOKENS ||
+    (model.inputTokenLimit !== undefined &&
+      input.estimatedInput > model.inputTokenLimit) ||
     !Number.isSafeInteger(input.maxOutput) ||
     input.maxOutput < 1 ||
     input.maxOutput > env.LLM_MAX_OUTPUT_TOKENS

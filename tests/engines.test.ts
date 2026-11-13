@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { simulate, defaultWeights } from "../packages/core/src/simulation";
+import {
+  simulate,
+  defaultWeights,
+  emotionalGuidance,
+} from "../packages/core/src/simulation";
 import {
   assessRepetition,
   fingerprint,
@@ -48,14 +52,50 @@ describe("Independent emotional simulation", () => {
       }).mood,
     ).toBeLessThanOrEqual(62);
   });
-  it("rest restores energy with elapsed time without granting mood rewards", () => {
+  it("waiting changes neither happiness nor legacy emotions, regardless of elapsed time", () => {
     expect(simulate(initial, { kind: "rest", seconds: 0 })).toEqual(initial);
     const rested = simulate(initial, { kind: "rest", seconds: 120 });
-    expect(rested.energy).toBe(70);
-    expect(rested.mood).toBe(50);
+    expect(rested).toEqual(initial);
   });
-  it("work consumes energy gradually", () => {
-    expect(simulate(initial, { kind: "work", effort: 4 }).energy).toBe(46);
+  it("ordinary work causes no tiredness or happiness decay", () => {
+    let state = { ...initial, energy: 0 };
+    for (let i = 0; i < 200; i++)
+      state = simulate(state, { kind: "work", effort: 100 });
+    expect(state).toEqual({ ...initial, energy: 0 });
+  });
+  it("raises happiness for useful outcomes and lowers it for failures", () => {
+    expect(simulate(initial, { kind: "milestone" }).mood).toBe(53);
+    expect(simulate(initial, { kind: "discovery" }).mood).toBe(52);
+    expect(simulate(initial, { kind: "failure" }).mood).toBe(48);
+    for (const kind of [
+      "milestone",
+      "discovery",
+      "failure",
+      "repetition",
+      "stagnation",
+    ] as const) {
+      const { mood: _mood, ...others } = simulate(initial, { kind });
+      const { mood: _initialMood, ...legacy } = initial;
+      expect(others).toEqual(legacy);
+    }
+    expect(
+      simulate({ ...initial, mood: 100 }, { kind: "milestone" }).mood,
+    ).toBe(100);
+    expect(simulate({ ...initial, mood: 0 }, { kind: "failure" }).mood).toBe(0);
+  });
+  it("uses outcome feedback rather than legacy tiredness, boredom or confidence to guide decisions", () => {
+    expect(
+      emotionalGuidance({
+        ...initial,
+        energy: 0,
+        boredom: 100,
+        frustration: 100,
+        confidence: 0,
+      }),
+    ).toEqual(emotionalGuidance(initial));
+    expect(emotionalGuidance({ ...initial, mood: 0 }).join(" ")).toContain(
+      "Continue working",
+    );
   });
 });
 describe("Deterministic anti-loop supervisor", () => {
@@ -80,7 +120,7 @@ describe("Deterministic anti-loop supervisor", () => {
   it("allows objectively productive repetition", () => {
     expect(
       assessRepetition(action, [
-        { ...record, meaningful: true },
+        { ...record, tool: "research.fetch", meaningful: true },
         record,
         record,
       ]).level,
@@ -95,6 +135,19 @@ describe("Deterministic anti-loop supervisor", () => {
           strategy: "different label",
         },
         [record, record, record],
+      ).blocked,
+    ).toBe(true);
+  });
+  it("blocks repeated discovery even when each query returns a different result list", () => {
+    expect(
+      assessRepetition(
+        action,
+        [record, record, record].map((item, index) => ({
+          ...item,
+          meaningful: true,
+          target: `different query ${index}`,
+          strategy: `different label ${index}`,
+        })),
       ).blocked,
     ).toBe(true);
   });

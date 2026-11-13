@@ -59,6 +59,18 @@ beforeAll(async () => {
     INSERT INTO "FinancialTransaction" (id,"externalId",kind,"amountMinor",currency,source,evidence)
       VALUES ('receipt','fixture-receipt','REVENUE',9007199254740993,'GBP','test','{"reference":"Precision fixture; not real income"}');
   `);
+  await source.query('UPDATE "CreatureState" SET skills = $1::jsonb', [
+    JSON.stringify({
+      coding: 12,
+      intelligence: 6,
+      creativity: 8,
+      research: 5,
+      testing: 7,
+      planning: 4,
+      business: 2,
+      adaptability: 3,
+    }),
+  ]);
 });
 afterAll(async () => {
   source?.release();
@@ -80,6 +92,9 @@ describe("Server state transfer", () => {
       (await target.query('SELECT mood, energy, status FROM "CreatureState"'))
         .rows[0],
     ).toEqual({ mood: 94, energy: 32, status: "WAITING_APPROVAL" });
+    expect(
+      (await target.query('SELECT skills FROM "CreatureState"')).rows[0].skills,
+    ).toMatchObject({ coding: 12, creativity: 8, adaptability: 3 });
     expect(
       (await target.query('SELECT content FROM "Memory"')).rows[0].content,
     ).toBe("Benwa's saved memory 🌱");

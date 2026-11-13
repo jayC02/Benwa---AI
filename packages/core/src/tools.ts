@@ -7,6 +7,9 @@ import { stages, type ToolName, type ToolResult } from "./schema.js";
 import { safeFile, readArtifact } from "./workspace.js";
 import { fetchPublic, searchPublic } from "./research.js";
 import { runSandbox } from "./sandbox.js";
+import { sandboxAvailable } from "./sandbox.js";
+import { env } from "./config.js";
+import { BrowserCheck, firecrawlBrowserTest } from "./external-research.js";
 export const toolInputs = {
   "research.search": z.object({ query: z.string().min(5).max(300) }).strict(),
   "research.fetch": z.object({ url: z.string().url().max(1000) }).strict(),
@@ -16,7 +19,13 @@ export const toolInputs = {
       content: z.string().min(40).max(80000),
     })
     .strict(),
-  "workspace.read": z.object({ path: z.string().max(240) }).strict(),
+  "workspace.read": z
+    .object({
+      path: z.string().max(240),
+      offset: z.number().int().min(0).max(200000).optional(),
+      limit: z.number().int().min(100).max(4000).optional(),
+    })
+    .strict(),
   "workspace.inspect": z
     .object({
       path: z.string().max(240),
@@ -27,7 +36,10 @@ export const toolInputs = {
     .object({ command: z.enum(["test", "node"]), file: z.string().max(240) })
     .strict(),
   "browser.test": z
-    .object({ path: z.string().endsWith(".html").max(240) })
+    .object({
+      path: z.string().endsWith(".html").max(240),
+      checks: z.array(BrowserCheck).max(20).optional(),
+    })
     .strict(),
   "project.plan": z
     .object({
@@ -84,13 +96,13 @@ export const toolDescriptions: Record<ToolName, string> = {
   "workspace.write":
     "Write a source/text file inside this project. Read-back hash verifies actual bytes; it does not prove commercial value.",
   "workspace.read":
-    "Read a project text file. Reading alone does not earn a progress reward.",
+    "Read one project text-file chunk (default 2000 characters). Continue with returned nextOffset; null means EOF. contentHash identifies the complete file: restart if it changes. Reading alone does not earn a progress reward.",
   "workspace.inspect":
     "Check required text in an artifact. Static inspection only, not an executed application test.",
   "sandbox.run":
     "Execute node or node --test for a project file in a networkless, read-only Docker sandbox. Never executes on the host.",
   "browser.test":
-    "Run Playwright against the project HTML in a networkless sandbox. Checks browser errors and captures a screenshot hash.",
+    "Run the project HTML in an isolated browser. For interactive pages supply checks: fill {selector,value}, click {selector}, then text {selector,contains} to assert the expected result. A screenshot alone is not a functional test. No host execution occurs.",
   "project.plan":
     "Persist a dependency-ordered task plan and a falsifiable experiment. This is preparation, not evidence of demand.",
   "project.advance":
@@ -99,7 +111,7 @@ export const toolDescriptions: Record<ToolName, string> = {
     "Reject a weak idea with a lesson and explicit conditions for reconsideration.",
   "memory.learn":
     "Persist an unverified, revisable belief. Cannot edit historical facts and does not earn rewards.",
-  rest: "Sleep with a minimum rest period. Only elapsed time restores energy. No novelty or mood reward.",
+  rest: "Wait briefly only when no actionable pending work is available. Work does not cause tiredness; waiting never raises happiness. Quota and provider cooldown waits are scheduled automatically.",
   "external.request":
     "Prepare a consequential action for human review. No external executor is enabled in the MVP.",
 };
@@ -162,7 +174,11 @@ export async function executeTool(
       return result(
         "source",
         `Found ${results.length} public sources`,
-        { results, contentHash: digest(JSON.stringify(results)) },
+        {
+          results,
+          substantive: false,
+          contentHash: digest(JSON.stringify(results)),
+        },
         results.length > 0,
       );
     }
@@ -211,9 +227,19 @@ export async function executeTool(
     case "workspace.read": {
       const p = toolInputs[name].parse(input);
       const content = await readArtifact(action.projectId, p.path);
+      const offset = p.offset ?? 0;
+      if (offset > content.length)
+        throw new Error("Read offset exceeds file length");
+      let end = Math.min(content.length, offset + (p.limit ?? 2000));
+      if (end < content.length && /[\uD800-\uDBFF]/.test(content[end - 1]))
+        end--;
       return result("lesson", `Read ${p.path}`, {
         path: p.path,
-        content: content.slice(0, 12000),
+        content: content.slice(offset, end),
+        offset,
+        nextOffset: end < content.length ? end : null,
+        totalCharacters: content.length,
+        contentHash: digest(content),
       });
     }
     case "workspace.inspect": {
@@ -246,12 +272,15 @@ export async function executeTool(
             };
       await safeFile(action.projectId, p.file);
       const content = await readArtifact(action.projectId, p.file);
-      const run = await runSandbox(
-        action.projectId,
-        action.id,
-        p.command,
-        p.file,
-      );
+      const run =
+        name === "browser.test" &&
+        !(await sandboxAvailable()) &&
+        env.FIRECRAWL_API_KEY
+          ? await firecrawlBrowserTest(
+              content,
+              toolInputs["browser.test"].parse(input).checks,
+            )
+          : await runSandbox(action.projectId, action.id, p.command, p.file);
       return result(
         "test",
         `${name === "browser.test" ? "Browser" : "Sandbox"} ${run.code === 0 ? "passed" : "failed"} for ${p.file}`,
@@ -448,11 +477,28 @@ export async function executeTool(
       const cfg = await db.agentConfiguration.findUniqueOrThrow({
         where: { id: "main" },
       });
-      const state = await db.creatureState.findUniqueOrThrow({
-        where: { id: "benwa" },
+      const browser =
+        Boolean(env.FIRECRAWL_API_KEY && env.FIRECRAWL_BROWSER_TESTS_ALLOWED) ||
+        (await sandboxAvailable());
+      const work = await db.project.count({
+        where: {
+          status: "ACTIVE",
+          tasks: { some: { status: "PENDING" } },
+          actions: { none: { approval: { is: { status: "PENDING" } } } },
+          stage: {
+            notIn: [
+              ...(!browser ? ["TESTING"] : []),
+              ...(env.AUTONOMY_MODE === "independent"
+                ? ["LAUNCH_APPROVAL"]
+                : []),
+            ],
+          },
+        },
       });
-      if (state.energy > 75 && state.activeCycles < cfg.maxSteps)
-        throw new Error("Rest is not needed yet; choose useful work");
+      if (work)
+        throw new Error(
+          "Actionable pending work remains; continue it instead of waiting. Tiredness is disabled.",
+        );
       const seconds = Math.max(cfg.restSeconds, Math.min(p.seconds, 1800));
       await db.creatureState.updateMany({
         where: { id: "benwa", status: "RUNNING" },
@@ -460,13 +506,12 @@ export async function executeTool(
           status: "RESTING",
           restStartedAt: new Date(),
           restUntil: new Date(Date.now() + seconds * 1000),
-          activity: "Sleeping",
-          activeCycles: 0,
+          activity: "Waiting for useful work",
         },
       });
       return result(
         "rest",
-        "Started a bounded rest period; energy recovers after elapsed time",
+        "Waiting briefly because no actionable pending work is available; happiness is unchanged",
         { seconds },
       );
     }

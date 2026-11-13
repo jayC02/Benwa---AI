@@ -19,11 +19,6 @@ import {
   CircleHelp,
   Activity,
   Leaf,
-  BatteryMedium,
-  Heart,
-  Telescope,
-  Brain,
-  Flame,
   FileCode2,
   AlertTriangle,
 } from "lucide-react";
@@ -36,6 +31,7 @@ import { ROOMS, roomForTool, type RoomId } from "../world/rooms";
 import { BADGE_LABEL, outcomeBadge } from "../world/progress";
 import ModelMonitoring from "./ModelMonitoring";
 import HumanAssistance from "./HumanAssistance";
+import ProgressPanel from "./ProgressPanel";
 type Tab = "Home" | "Projects" | "Memories" | "Ledger" | "Settings";
 const tabs: { name: Tab; icon: typeof House }[] = [
   { name: "Home", icon: House },
@@ -169,34 +165,6 @@ export default function Dashboard({ initial }: { initial: Snapshot }) {
     (i) =>
       !i.resolvedAt && (!i.expiresAt || new Date(i.expiresAt) > new Date()),
   );
-  const metrics = [
-    { name: "Mood", value: s.creature.mood, icon: Heart, color: "rose" },
-    {
-      name: "Energy",
-      value: s.creature.energy,
-      icon: BatteryMedium,
-      color: "mint",
-    },
-    {
-      name: "Curiosity",
-      value: s.creature.curiosity,
-      icon: Telescope,
-      color: "blue",
-    },
-    {
-      name: "Confidence",
-      value: s.creature.confidence,
-      icon: Brain,
-      color: "lilac",
-    },
-    { name: "Boredom", value: s.creature.boredom, icon: Clock3, color: "sand" },
-    {
-      name: "Frustration",
-      value: s.creature.frustration,
-      icon: Flame,
-      color: "orange",
-    },
-  ];
   function projectList() {
     return s.projects.length ? (
       s.projects.map((p) => (
@@ -435,7 +403,9 @@ export default function Dashboard({ initial }: { initial: Snapshot }) {
                 }
               >
                 <span className={`live-dot ${running ? "on" : ""}`} />
-                {words(s.creature.status)}
+                {s.creature.status === "RESTING"
+                  ? "waiting"
+                  : words(s.creature.status)}
               </Pill>
               <button
                 className="control-button"
@@ -504,6 +474,7 @@ export default function Dashboard({ initial }: { initial: Snapshot }) {
               </button>
             </div>
           )}
+          {tab === "Home" && <ProgressPanel creature={s.creature} />}
           {tab === "Home" && (
             <div className="dashboard-grid">
               <div className="main-column">
@@ -569,38 +540,6 @@ export default function Dashboard({ initial }: { initial: Snapshot }) {
                       </div>
                     </div>
                   )}
-                </section>
-                <section className="feelings">
-                  <div className="section-heading">
-                    <h2>How he’s feeling</h2>
-                    <span className="tiny">
-                      Simulated, grounded in outcomes
-                    </span>
-                  </div>
-                  <div className="emotion-grid">
-                    {metrics.map(({ name, value, icon: Icon, color }) => (
-                      <div className={`emotion ${color}`} key={name}>
-                        <div>
-                          <Icon size={15} />
-                          <span>{name}</span>
-                          <strong>
-                            {Math.round(value)}
-                            <small>/100</small>
-                          </strong>
-                        </div>
-                        <div
-                          className="meter"
-                          role="meter"
-                          aria-label={name}
-                          aria-valuemin={0}
-                          aria-valuemax={100}
-                          aria-valuenow={Math.round(value)}
-                        >
-                          <span style={{ width: `${value}%` }} />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
                 </section>
               </div>
               <aside className="right-column">
@@ -1141,7 +1080,7 @@ function SettingsPanel({
               />
             </label>
             <label>
-              Maximum active cycles before resting
+              Actions between memory checkpoints
               <input
                 name="maxSteps"
                 type="number"
@@ -1152,7 +1091,7 @@ function SettingsPanel({
               />
             </label>
             <label>
-              Minimum rest in seconds
+              Minimum idle wait in seconds
               <input
                 name="restSeconds"
                 type="number"
@@ -1221,11 +1160,13 @@ function SettingsPanel({
               <div>
                 <span>Source search</span>
                 <strong>
-                  {s.searchProvider === "public"
-                    ? "Free public sources"
-                    : s.searchConfigured
-                      ? "Brave configured"
-                      : "Not configured"}
+                  {s.searchProvider === "langsearch"
+                    ? "LangSearch · general web"
+                    : s.searchProvider === "public"
+                      ? "Free public sources"
+                      : s.searchConfigured
+                        ? "Brave configured"
+                        : "Not configured"}
                 </strong>
               </div>
               <div>

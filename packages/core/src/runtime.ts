@@ -11,6 +11,7 @@ import {
 } from "./provider.js";
 import { configuredProvider } from "./providers.js";
 import { sandboxAvailable } from "./sandbox.js";
+import { workspaceManifest } from "./workspace.js";
 import {
   fingerprint,
   assessRepetition,
@@ -21,6 +22,7 @@ import {
 import { executeTool, toolInputs } from "./tools.js";
 import { simulate, emotionalGuidance, defaultWeights } from "./simulation.js";
 import { retrieveMemory, consolidateMemory } from "./memory.js";
+import { applySkillOutcome, readSkillRatings } from "./skills.js";
 import { financialSummary } from "./finance.js";
 import { finishJob, retryAt } from "./queue.js";
 const dataJson = (value: unknown): Prisma.InputJsonValue =>
@@ -28,12 +30,21 @@ const dataJson = (value: unknown): Prisma.InputJsonValue =>
 export const today = () => new Date().toISOString().slice(0, 10);
 const nextDay = () => new Date(`${today()}T00:00:00.000Z`).getTime() + 86400000;
 export async function buildContext(): Promise<AgentContext> {
+  const sandbox = await sandboxAvailable();
+  const browser =
+    sandbox ||
+    (Boolean(env.FIRECRAWL_API_KEY) && env.FIRECRAWL_BROWSER_TESTS_ALLOWED);
   const state = await db.creatureState.findUniqueOrThrow({
     where: { id: "benwa" },
   });
   const projects = await db.project.findMany({
     where: {
       status: "ACTIVE",
+      ...(env.AGENT_MODE === "real" &&
+      env.AUTONOMY_MODE === "independent" &&
+      !browser
+        ? { stage: { not: "TESTING" } }
+        : {}),
       actions: { none: { approval: { is: { status: "PENDING" } } } },
     },
     orderBy: { score: "desc" },
@@ -60,10 +71,22 @@ export async function buildContext(): Promise<AgentContext> {
     projects[0]?.description,
   );
   const financial = await financialSummary();
+  const manifests = await Promise.all(
+    projects.map((project) => workspaceManifest(project.id)),
+  );
   return {
-    state,
+    state: {
+      id: state.id,
+      name: state.name,
+      status: state.status,
+      activity: state.activity,
+      thought: state.thought,
+      happiness: state.mood,
+      skills: readSkillRatings(state.skills),
+      activeCycles: state.activeCycles,
+    },
     guidance: emotionalGuidance(state),
-    projects: projects.map((p) => ({
+    projects: projects.map((p, index) => ({
       id: p.id,
       name: p.name,
       stage: p.stage,
@@ -71,6 +94,16 @@ export async function buildContext(): Promise<AgentContext> {
       hypothesis: p.hypothesis,
       tasks: p.tasks,
       goals: p.goals,
+      description: p.description,
+      checkpoint: {
+        stageSince: p.stageChangedAt,
+        staleAttempts: p.stagnantAttempts,
+        files: manifests[index],
+        nextStep:
+          p.stage === "TESTING"
+            ? "Read the actual implementation, fix missing functionality, run browser.test with functional assertions, then advance using that test's evidence ID. Research does not satisfy TESTING."
+            : "Advance the existing pending task with concrete evidence.",
+      },
     })),
     memories,
     recent: recent.map((a) => ({
@@ -81,8 +114,24 @@ export async function buildContext(): Promise<AgentContext> {
       outcome: a.outcome
         ? {
             ...a.outcome,
-            evidenceExcerpt: json(a.outcome.evidence).slice(0, 3500),
-            evidence: undefined,
+            happinessFeedback:
+              a.outcome.evidence &&
+              typeof a.outcome.evidence === "object" &&
+              !Array.isArray(a.outcome.evidence)
+                ? a.outcome.evidence.happinessFeedback
+                : undefined,
+            skillFeedback:
+              a.outcome.evidence &&
+              typeof a.outcome.evidence === "object" &&
+              !Array.isArray(a.outcome.evidence)
+                ? a.outcome.evidence.skillFeedback
+                : undefined,
+            evidenceExcerpt:
+              a.tool === "workspace.read"
+                ? undefined
+                : json(a.outcome.evidence).slice(0, 3500),
+            evidence:
+              a.tool === "workspace.read" ? a.outcome.evidence : undefined,
           }
         : null,
     })),
@@ -93,14 +142,17 @@ export async function buildContext(): Promise<AgentContext> {
         : "Focus on the highest-scoring project. No filler actions.",
     approvedHosts: env.RESEARCH_HOSTS,
     capabilities: {
-      sandbox: await sandboxAvailable(),
+      sandbox,
+      browser,
       web: env.RESEARCH_HOSTS.includes("*")
         ? "public HTTPS pages"
         : "approved HTTPS hosts",
       search:
         env.SEARCH_PROVIDER === "public"
           ? "Wikipedia and Hacker News source discovery"
-          : "Brave",
+          : env.SEARCH_PROVIDER === "langsearch"
+            ? "LangSearch general web search with source text"
+            : "Brave",
       externalExecution: false,
     },
     financial: {
@@ -278,6 +330,17 @@ async function storeDecision(
 }
 async function validateAction(action: Action, decision: Decision) {
   toolInputs[decision.tool].parse(decision.input);
+  const history = await db.action.findMany({
+    where: { projectId: action.projectId, id: { not: action.id } },
+    orderBy: { createdAt: "desc" },
+    take: 12,
+    include: { outcome: true },
+  });
+  if (continuesFileRead(action, history))
+    return {
+      blocked: false,
+      reason: "Continue forward through the same file in bounded chunks.",
+    };
   const blocked = await db.supervisorIntervention.findFirst({
     where: {
       projectId: action.projectId,
@@ -296,12 +359,6 @@ async function validateAction(action: Action, decision: Decision) {
       reason:
         "The supervisor temporarily blocked this approach. Change the method and assumptions.",
     };
-  const history = await db.action.findMany({
-    where: { projectId: action.projectId, id: { not: action.id } },
-    orderBy: { createdAt: "desc" },
-    take: 12,
-    include: { outcome: true },
-  });
   const evaluation = assessRepetition(
     decision,
     history.map((a) => ({
@@ -352,7 +409,51 @@ async function validateAction(action: Action, decision: Decision) {
     reason: "Three stagnant attempts; choose a materially different approach.",
   };
 }
+function continuesFileRead(
+  action: Action,
+  history: (Action & {
+    outcome: { verified: boolean; evidence: unknown } | null;
+  })[],
+  currentHash?: unknown,
+) {
+  if (action.tool !== "workspace.read") return false;
+  const input = toolInputs["workspace.read"].parse(action.input);
+  if (!input.offset) return false;
+  const previous = history.find(
+    (a) =>
+      a.tool === "workspace.read" &&
+      toolInputs["workspace.read"].safeParse(a.input).data?.path === input.path,
+  );
+  if (previous?.status !== "SUCCEEDED" || !previous.outcome?.verified)
+    return false;
+  const evidence = previous.outcome.evidence as Record<string, unknown>;
+  return (
+    typeof evidence.content === "string" &&
+    typeof evidence.offset === "number" &&
+    typeof evidence.contentHash === "string" &&
+    (currentHash === undefined || currentHash === evidence.contentHash) &&
+    input.offset > evidence.offset &&
+    input.offset <= evidence.offset + evidence.content.length
+  );
+}
 async function commitOutcome(action: Action, result: ToolResult) {
+  const readingContinuation =
+    result.success &&
+    action.tool === "workspace.read" &&
+    continuesFileRead(
+      action,
+      await db.action.findMany({
+        where: {
+          projectId: action.projectId,
+          tool: "workspace.read",
+          id: { not: action.id },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 12,
+        include: { outcome: true },
+      }),
+      result.evidence.contentHash,
+    );
   const prior = await db.actionOutcome.findMany({
     where: { evidenceHash: { not: null } },
     select: { evidenceHash: true },
@@ -385,15 +486,6 @@ async function commitOutcome(action: Action, result: ToolResult) {
     if (await tx.actionOutcome.findUnique({ where: { actionId: action.id } }))
       return;
     await tx.$queryRaw`SELECT id FROM "CreatureState" WHERE id='benwa' FOR UPDATE`;
-    await tx.actionOutcome.create({
-      data: {
-        actionId: action.id,
-        ...assessment,
-        simulated: result.simulated,
-        summary: result.summary,
-        evidence: dataJson(result.evidence),
-      },
-    });
     await tx.action.update({
       where: { id: action.id },
       data: {
@@ -404,19 +496,23 @@ async function commitOutcome(action: Action, result: ToolResult) {
     const state = await tx.creatureState.findUniqueOrThrow({
       where: { id: "benwa" },
     });
-    let values = simulate(state, {
-      kind: "work",
-      effort: action.tool.startsWith("research.")
-        ? 3
-        : action.tool === "rest"
-          ? 0
-          : 5,
+    const previousProject = await tx.project.findUniqueOrThrow({
+      where: { id: action.projectId },
     });
+    const advancesCurrentWork =
+      assessment.meaningful &&
+      !(
+        action.tool.startsWith("research.") &&
+        ["TESTING", "BUILDING", "LAUNCH_APPROVAL"].includes(
+          previousProject.stage,
+        )
+      );
+    let values = simulate(state, { kind: "work" });
     const weights = {
       ...defaultWeights,
       ...(cfg.rewardWeights as typeof defaultWeights),
     };
-    if (assessment.meaningful)
+    if (advancesCurrentWork)
       values = simulate(
         values,
         { kind: result.kind === "source" ? "discovery" : "milestone" },
@@ -424,13 +520,69 @@ async function commitOutcome(action: Action, result: ToolResult) {
       );
     else if (!result.success)
       values = simulate(values, { kind: "failure" }, weights);
+    const happinessFeedback = {
+      signal: advancesCurrentWork
+        ? "positive"
+        : !result.success
+          ? "negative"
+          : "neutral",
+      before: state.mood,
+      after: values.mood,
+      delta: Math.round((values.mood - state.mood) * 10) / 10,
+      reason: advancesCurrentWork
+        ? "Verified novel evidence advanced the current project objective."
+        : !result.success
+          ? `The action failed: ${result.summary}`
+          : "No new verified progress on the current objective; routine work, repeated evidence and waiting receive no happiness reward.",
+    };
+    const previousAction = await tx.action.findFirst({
+      where: {
+        projectId: action.projectId,
+        id: { not: action.id },
+        completedAt: { not: null },
+      },
+      orderBy: { completedAt: "desc" },
+      select: { status: true, strategy: true },
+    });
+    const skillFeedback = applySkillOutcome(state.skills, {
+      tool: action.tool,
+      target:
+        typeof result.evidence.path === "string"
+          ? result.evidence.path
+          : action.target,
+      progress: advancesCurrentWork,
+      failed: !result.success,
+      recovered:
+        previousAction?.status === "FAILED" &&
+        previousAction.strategy !== action.strategy,
+      repeatedFailure:
+        previousAction?.status === "FAILED" &&
+        previousAction.strategy === action.strategy,
+    });
+    await tx.actionOutcome.create({
+      data: {
+        actionId: action.id,
+        ...assessment,
+        simulated: result.simulated,
+        summary: result.summary,
+        evidence: dataJson({
+          ...result.evidence,
+          happinessFeedback,
+          skillFeedback: skillFeedback.changes,
+        }),
+      },
+    });
     await tx.creatureState.update({
       where: { id: "benwa" },
-      data: { ...values, activeCycles: { increment: 1 } },
+      data: {
+        ...values,
+        skills: skillFeedback.ratings,
+        activeCycles: { increment: 1 },
+      },
     });
     await tx.emotionSnapshot.create({
       data: {
-        values: { ...values },
+        values: { ...values, skills: skillFeedback.ratings },
         event: result.summary,
         actionId: action.id,
       },
@@ -440,7 +592,14 @@ async function commitOutcome(action: Action, result: ToolResult) {
         category: result.kind === "source" ? "semantic" : "episodic",
         projectId: action.projectId,
         sourceActionId: action.id,
-        content: `Observed ${action.tool}: ${result.summary}. Declared intention (unverified): ${action.intention}`,
+        content: `Observed ${action.tool}: ${result.summary}. Happiness feedback: ${happinessFeedback.signal}, ${happinessFeedback.delta >= 0 ? "+" : ""}${happinessFeedback.delta} (${happinessFeedback.before} → ${happinessFeedback.after}). ${happinessFeedback.reason} Skills: ${
+          Object.entries(skillFeedback.changes)
+            .map(
+              ([skill, change]) =>
+                `${skill} ${change.delta >= 0 ? "+" : ""}${change.delta}`,
+            )
+            .join(", ") || "unchanged"
+        }. Declared intention (unverified): ${action.intention}`,
         verified: assessment.verified,
         simulated: result.simulated,
         importance: assessment.meaningful ? 0.8 : 0.3,
@@ -448,16 +607,18 @@ async function commitOutcome(action: Action, result: ToolResult) {
     });
     const project = await tx.project.update({
       where: { id: action.projectId },
-      data: assessment.meaningful
+      data: advancesCurrentWork
         ? {
             stagnantAttempts: 0,
             progressAt: new Date(),
             score: { increment: result.kind === "source" ? 1 : 0.4 },
           }
-        : {
-            stagnantAttempts: { increment: 1 },
-            score: { decrement: result.success ? 0.5 : 2 },
-          },
+        : readingContinuation || (action.tool === "rest" && result.success)
+          ? {}
+          : {
+              stagnantAttempts: { increment: 1 },
+              score: { decrement: result.success ? 0.5 : 2 },
+            },
     });
     if (project.stagnantAttempts >= 6) {
       await tx.project.update({
@@ -530,10 +691,10 @@ export async function runCycle(job: ScheduledJob, providerOverride?: Provider) {
           status: "RUNNING",
           restUntil: null,
           restStartedAt: null,
-          activity: "Waking up",
+          activity: "Resuming useful work",
         },
       });
-      await consolidateMemory();
+      await consolidateMemory(false);
     }
     if (state.status === "BUDGET_PAUSED") {
       const budget = await db.budget.findUnique({ where: { day: today() } });
@@ -555,21 +716,15 @@ export async function runCycle(job: ScheduledJob, providerOverride?: Provider) {
       await finishJob(job, null);
       return;
     }
-    if (state.energy < 15 || state.activeCycles >= cfg.maxSteps) {
-      const until = new Date(Date.now() + cfg.restSeconds * 1000);
+    if (state.activeCycles >= cfg.maxSteps) {
+      // maxSteps is now a memory checkpoint interval, never a fatigue/sleep limit.
+      await consolidateMemory(false);
       await db.creatureState.update({
         where: { id: "benwa" },
         data: {
-          status: "RESTING",
-          restStartedAt: new Date(),
-          restUntil: until,
           activeCycles: 0,
-          activity: "Sleeping",
-          thought: "A short rest, then I’ll come back to the evidence.",
         },
       });
-      await finishJob(job, until);
-      return;
     }
     const provider = providerOverride ?? configuredProvider(cfg.mode);
     let cycle = await db.agentCycle.upsert({

@@ -58,7 +58,7 @@ export default function RightNow({
         {target.label && <span className="world-flag">{target.label}</span>}
         {live && s.cycle && (
           <time className="right-now-time">
-            started {ago(s.cycle.createdAt)}
+            started {ago(s.cycle.createdAt, Date.parse(s.serverTime))}
           </time>
         )}
       </div>

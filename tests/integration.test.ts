@@ -6,6 +6,7 @@ import {
   describe,
   it,
   expect,
+  vi,
 } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
@@ -48,6 +49,9 @@ beforeAll(async () => {
   process.env.DATABASE_URL = `postgresql://postgres:postgres@${server.getServerConn()}/benwa?connection_limit=1`;
   process.env.AGENT_MODE = "demo";
   process.env.AUTONOMY_MODE = "supervised";
+  process.env.FIRECRAWL_API_KEY = "";
+  process.env.LANGSEARCH_API_KEY = "";
+  process.env.SEARCH_PROVIDER = "public";
   process.env.WORKSPACE_ROOT = ".data/test-projects";
   ({ db, initialize } = await import("../packages/core/src/db"));
   queue = await import("../packages/core/src/queue");
@@ -62,6 +66,7 @@ afterAll(async () => {
   await postgres?.close();
 });
 beforeEach(async () => {
+  await db.researchUsage.deleteMany();
   await db.$executeRawUnsafe(
     'TRUNCATE TABLE "ModelRequest","ModelAccess","ModelCooldown","HumanAssistanceRequest","CreatureState","EmotionSnapshot","AgentConfiguration","Budget","Goal","Project","ProjectMilestone","Task","AgentCycle","Action","ToolExecution","ActionOutcome","Memory","Opportunity","Experiment","FinancialTransaction","SupervisorIntervention","ApprovalRequest","ScheduledJob" CASCADE',
   );
@@ -493,6 +498,132 @@ describe("Persisted execution, finance and supervision", () => {
     );
     expect(await db.action.count()).toBe(2);
   });
+  it("reads a large artifact in bounded, resumable chunks without losing text", async () => {
+    await cycle(new providers.FakeProvider([decision()]));
+    const p = await db.project.findFirstOrThrow();
+    const workspace = await import("../packages/core/src/workspace");
+    const tools = await import("../packages/core/src/tools");
+    const source = 'A line with 😀 and "quotes"\n'.repeat(400);
+    await fs.writeFile(
+      await workspace.safeFile(p.id, "large.txt", true),
+      source,
+    );
+    const action = await db.action.findFirstOrThrow();
+    let offset = 0,
+      reconstructed = "",
+      hash: unknown;
+    do {
+      const output = await tools.executeTool(
+        {
+          ...action,
+          tool: "workspace.read",
+          input: { path: "large.txt", offset, limit: 101 },
+        },
+        "real",
+      );
+      const evidence = output.evidence as {
+        content: string;
+        offset: number;
+        nextOffset: number | null;
+        contentHash: string;
+        totalCharacters: number;
+      };
+      expect(evidence.offset).toBe(offset);
+      expect(evidence.content.length).toBeLessThanOrEqual(101);
+      expect(evidence.content).not.toMatch(/[\uD800-\uDBFF]$/);
+      expect(evidence.totalCharacters).toBe(source.length);
+      hash ??= evidence.contentHash;
+      expect(evidence.contentHash).toBe(hash);
+      reconstructed += evidence.content;
+      if (evidence.nextOffset === null) break;
+      expect(evidence.nextOffset).toBeGreaterThan(offset);
+      offset = evidence.nextOffset;
+    } while (offset < source.length);
+    expect(reconstructed).toBe(source);
+    expect(
+      tools.toolInputs["workspace.read"].safeParse({
+        path: "large.txt",
+        offset: -1,
+      }).success,
+    ).toBe(false);
+    expect(
+      tools.toolInputs["workspace.read"].safeParse({
+        path: "large.txt",
+        limit: 100000,
+      }).success,
+    ).toBe(false);
+    await expect(
+      tools.executeTool(
+        {
+          ...action,
+          tool: "workspace.read",
+          input: { path: "large.txt", offset: source.length + 1 },
+        },
+        "real",
+      ),
+    ).rejects.toThrow("offset exceeds");
+  });
+  it("lets forward file chunks continue without repetition penalties or invented rewards", async () => {
+    await cycle(new providers.FakeProvider([decision()]));
+    const p = await db.project.findFirstOrThrow();
+    const workspace = await import("../packages/core/src/workspace");
+    await fs.writeFile(
+      await workspace.safeFile(p.id, "chunked.txt", true),
+      "source text\n".repeat(1000),
+    );
+    const before = await db.project.findUniqueOrThrow({ where: { id: p.id } });
+    for (let offset = 0; offset < 7000; offset += 1000)
+      await cycle(
+        new providers.FakeProvider([
+          decision({
+            newProject: null,
+            projectId: p.id,
+            tool: "workspace.read",
+            target: "chunked.txt",
+            input: { path: "chunked.txt", offset, limit: 1000 },
+            intention: "Understand the next source section",
+            strategy: "Read the existing implementation in order",
+          }),
+        ]),
+      );
+    expect(
+      await db.action.count({
+        where: { tool: "workspace.read", status: "SUCCEEDED" },
+      }),
+    ).toBe(7);
+    expect(
+      await db.supervisorIntervention.count({ where: { level: { gte: 2 } } }),
+    ).toBe(0);
+    const after = await db.project.findUniqueOrThrow({ where: { id: p.id } });
+    expect(after.status).toBe("ACTIVE");
+    expect(after.stage).toBe(before.stage);
+    expect(after.progressAt).toEqual(before.progressAt);
+    expect(after.score).toBeLessThanOrEqual(before.score);
+    expect(after.stagnantAttempts).toBe(1);
+    expect(
+      await db.actionOutcome.count({
+        where: { action: { tool: "workspace.read" }, meaningful: true },
+      }),
+    ).toBe(0);
+    // Re-reading the same final offset still trips the existing anti-loop guard.
+    for (let i = 0; i < 4; i++)
+      await cycle(
+        new providers.FakeProvider([
+          decision({
+            newProject: null,
+            projectId: p.id,
+            tool: "workspace.read",
+            target: "chunked.txt",
+            input: { path: "chunked.txt", offset: 6000, limit: 1000 },
+            intention: "Understand the next source section",
+            strategy: "Read the existing implementation in order",
+          }),
+        ]),
+      );
+    expect(
+      await db.supervisorIntervention.count({ where: { level: 2 } }),
+    ).toBeGreaterThan(0);
+  });
   it("records a failed tool and continues safely to a different useful action", async () => {
     await cycle(
       new providers.FakeProvider([
@@ -654,7 +785,7 @@ describe("Persisted execution, finance and supervision", () => {
     expect(await db.toolExecution.count()).toBe(1);
     expect(await db.actionOutcome.count()).toBe(1);
   });
-  it("recovers energy and wakes without losing persistent state", async () => {
+  it("resumes an expired idle wait without manufacturing happiness or energy", async () => {
     await db.creatureState.update({
       where: { id: "benwa" },
       data: {
@@ -668,8 +799,161 @@ describe("Persisted execution, finance and supervision", () => {
     const state = await db.creatureState.findUniqueOrThrow({
       where: { id: "benwa" },
     });
-    expect(state.energy).toBeGreaterThan(10);
+    expect(state.energy).toBe(10);
     expect(state.status).toBe("RUNNING");
+  });
+  it("keeps working with zero legacy energy, zero happiness and an elapsed cycle interval", async () => {
+    await db.agentConfiguration.update({
+      where: { id: "main" },
+      data: { maxSteps: 1 },
+    });
+    await db.creatureState.update({
+      where: { id: "benwa" },
+      data: { energy: 0, mood: 0, activeCycles: 1 },
+    });
+    await cycle(new providers.FakeProvider([decision()]));
+    const p = await db.project.findFirstOrThrow();
+    await cycle(
+      new providers.FakeProvider([
+        decision({
+          newProject: null,
+          projectId: p.id,
+          input: {
+            path: "another.md",
+            content:
+              "A distinct useful implementation detail for the current project.",
+          },
+          target: "another.md",
+        }),
+      ]),
+    );
+    const state = await db.creatureState.findUniqueOrThrow({
+      where: { id: "benwa" },
+    });
+    expect(state.status).toBe("RUNNING");
+    expect(state.restUntil).toBeNull();
+    expect(state.energy).toBe(0);
+    expect(state.mood).toBe(6);
+    expect(await db.action.count({ where: { status: "SUCCEEDED" } })).toBe(2);
+    expect(await db.memory.count({ where: { category: "self-model" } })).toBe(
+      1,
+    );
+  });
+  it("persists outcome-linked happiness feedback and supplies it to the next decision", async () => {
+    const initial = await db.creatureState.findUniqueOrThrow({
+      where: { id: "benwa" },
+    });
+    await cycle(new providers.FakeProvider([decision()]));
+    const p = await db.project.findFirstOrThrow();
+    let state = await db.creatureState.findUniqueOrThrow({
+      where: { id: "benwa" },
+    });
+    expect(state.mood).toBe(initial.mood + 3);
+    let outcome = await db.actionOutcome.findFirstOrThrow({
+      orderBy: { createdAt: "desc" },
+    });
+    expect(outcome.evidence).toMatchObject({
+      happinessFeedback: {
+        signal: "positive",
+        before: initial.mood,
+        after: state.mood,
+        delta: 3,
+      },
+    });
+    // Identical bytes are neutral rather than another reward.
+    await cycle(
+      new providers.FakeProvider([
+        decision({ newProject: null, projectId: p.id }),
+      ]),
+    );
+    expect(
+      (await db.creatureState.findUniqueOrThrow({ where: { id: "benwa" } }))
+        .mood,
+    ).toBe(state.mood);
+    outcome = await db.actionOutcome.findFirstOrThrow({
+      orderBy: { createdAt: "desc" },
+    });
+    expect(outcome.evidence).toMatchObject({
+      happinessFeedback: { signal: "neutral", delta: 0 },
+    });
+    await cycle(
+      new providers.FakeProvider([
+        decision({
+          newProject: null,
+          projectId: p.id,
+          tool: "workspace.read",
+          input: { path: "missing.txt" },
+        }),
+      ]),
+    );
+    state = await db.creatureState.findUniqueOrThrow({
+      where: { id: "benwa" },
+    });
+    expect(state.mood).toBe(initial.mood + 1);
+    const c = await runtime.buildContext();
+    expect(c.state).toMatchObject({ happiness: state.mood });
+    expect(c.state).not.toHaveProperty("energy");
+    expect(c.recent[0].outcome).toMatchObject({
+      happinessFeedback: { signal: "negative", delta: -2 },
+    });
+    expect(
+      await db.memory.findFirst({ where: { sourceActionId: c.recent[0].id } }),
+    ).toMatchObject({
+      content: expect.stringContaining("Happiness feedback: negative"),
+    });
+  });
+  it("only waits when actionable pending work is unavailable and gives no happiness reward", async () => {
+    await cycle(new providers.FakeProvider([decision()]));
+    const p = await db.project.findFirstOrThrow();
+    const action = await db.action.findFirstOrThrow();
+    const pending = await db.task.create({
+      data: {
+        projectId: p.id,
+        title: "Finish the existing experiment",
+        stage: p.stage,
+      },
+    });
+    await db.creatureState.update({
+      where: { id: "benwa" },
+      data: { mood: 25, energy: 0 },
+    });
+    const { executeTool } = await import("../packages/core/src/tools");
+    await expect(
+      executeTool({ ...action, tool: "rest", input: { seconds: 120 } }, "demo"),
+    ).rejects.toThrow("Actionable pending work remains");
+    await db.task.update({
+      where: { id: pending.id },
+      data: { status: "COMPLETED" },
+    });
+    const before = await db.project.findFirstOrThrow();
+    await cycle(
+      new providers.FakeProvider([
+        decision({
+          newProject: null,
+          projectId: p.id,
+          tool: "rest",
+          input: { seconds: 120 },
+          intention: "Wait until useful work becomes available",
+        }),
+      ]),
+    );
+    const state = await db.creatureState.findUniqueOrThrow({
+      where: { id: "benwa" },
+    });
+    expect(state.status).toBe("RESTING");
+    expect(state.mood).toBe(25);
+    expect(state.energy).toBe(0);
+    const after = await db.project.findFirstOrThrow();
+    expect(after.progressAt).toEqual(before.progressAt);
+    expect(after.score).toBe(before.score);
+    expect(after.stagnantAttempts).toBe(before.stagnantAttempts);
+    expect(
+      (
+        await db.actionOutcome.findFirstOrThrow({
+          orderBy: { createdAt: "desc" },
+        })
+      ).evidence,
+    ).toMatchObject({ happinessFeedback: { signal: "neutral", delta: 0 } });
   });
   it("returns the dashboard entirely from persisted application data", async () => {
     await cycle(new providers.FakeProvider([decision()]));
@@ -679,6 +963,100 @@ describe("Persisted execution, finance and supervision", () => {
     expect(view.actions).toHaveLength(1);
     expect(view.projects[0].name).toBe(project.name);
     expect(view.finance.revenue).toBe(0n);
+  });
+  it("persists skills once per outcome, lowers failed skills, and restores legacy progress once", async () => {
+    const good = decision({
+      target: "calculator.ts",
+      input: {
+        path: "calculator.ts",
+        content:
+          "export const breakEven = (cost: number, margin: number) => Math.ceil(cost / margin);",
+      },
+    });
+    await cycle(new providers.FakeProvider([good]));
+    const p = await db.project.findFirstOrThrow();
+    let state = await db.creatureState.findUniqueOrThrow({
+      where: { id: "benwa" },
+    });
+    expect(state.skills).toMatchObject({
+      coding: 1,
+      intelligence: 0.5,
+      creativity: 0.5,
+    });
+    // Repeated bytes are not more skill XP.
+    await cycle(
+      new providers.FakeProvider([
+        decision({ ...good, newProject: null, projectId: p.id }),
+      ]),
+    );
+    expect(
+      (await db.creatureState.findUniqueOrThrow({ where: { id: "benwa" } }))
+        .skills,
+    ).toEqual(state.skills);
+    await cycle(
+      new providers.FakeProvider([
+        decision({
+          newProject: null,
+          projectId: p.id,
+          tool: "workspace.inspect",
+          target: "calculator.ts",
+          input: { path: "calculator.ts", contains: ["missingFunction"] },
+        }),
+      ]),
+    );
+    state = await db.creatureState.findUniqueOrThrow({
+      where: { id: "benwa" },
+    });
+    expect(state.skills).toMatchObject({ intelligence: 0 });
+    const failed = await db.actionOutcome.findFirstOrThrow({
+      orderBy: { createdAt: "desc" },
+    });
+    expect(failed.evidence).toMatchObject({
+      skillFeedback: { intelligence: { delta: -0.5 } },
+    });
+    await cycle(
+      new providers.FakeProvider([
+        decision({
+          newProject: null,
+          projectId: p.id,
+          tool: "workspace.write",
+          target: "calculator.ts",
+          strategy: "Implement a guarded formula after inspecting the failure",
+          input: {
+            path: "calculator.ts",
+            content:
+              "export function breakEven(cost: number, margin: number) { if (margin <= 0) throw new Error('Positive margin required'); return Math.ceil(cost / margin); }",
+          },
+        }),
+      ]),
+    );
+    const saved = (
+      await db.creatureState.findUniqueOrThrow({ where: { id: "benwa" } })
+    ).skills;
+    expect(saved).toMatchObject({ adaptability: 1, coding: 2, testing: 0 });
+    await db.$disconnect();
+    expect(
+      (await db.creatureState.findUniqueOrThrow({ where: { id: "benwa" } }))
+        .skills,
+    ).toEqual(saved);
+    await db.creatureState.update({
+      where: { id: "benwa" },
+      data: { skills: {} },
+    });
+    await initialize();
+    expect(
+      (await db.creatureState.findUniqueOrThrow({ where: { id: "benwa" } }))
+        .skills,
+    ).toEqual(saved);
+    await initialize();
+    expect(
+      (await db.creatureState.findUniqueOrThrow({ where: { id: "benwa" } }))
+        .skills,
+    ).toEqual(saved);
+    const view = await (
+      await import("../apps/web/src/server/snapshot")
+    ).snapshot();
+    expect(view.creature.skills).toEqual(saved);
   });
 });
 
@@ -740,7 +1118,7 @@ describe("Gemini routing and durable free-tier quotas", () => {
               id: "task-a",
               title: complex
                 ? "Debug a complex concurrent algorithm"
-                : "Review a public reference",
+                : "Read a public reference",
               status: "PENDING",
             },
           ],
@@ -756,11 +1134,7 @@ describe("Gemini routing and durable free-tier quotas", () => {
     } as import("../packages/core/src/provider").AgentContext;
   }
   async function ready(
-    ids = [
-      "gemini-3.5-flash-lite",
-      "gemini-3.1-flash-lite",
-      "gemini-4-hydrogen",
-    ],
+    ids = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-4-hydrogen"],
   ) {
     for (const id of ids)
       await db.modelAccess.create({
@@ -814,7 +1188,68 @@ describe("Gemini routing and durable free-tier quotas", () => {
       fake(advanced.projects[0].id),
     ).decide(advanced);
     expect(two.modelId).toBe("gemini-4-hydrogen");
-    expect((await db.budget.findFirstOrThrow()).tokensUsed).toBe(300);
+    expect((await db.budget.findFirstOrThrow()).tokensUsed).toBe(340);
+  });
+  it("packs oversized work before dispatch while keeping the same project and memory", async () => {
+    await ready();
+    const c = await context(true);
+    c.memories = [
+      {
+        id: "critical-memory",
+        content:
+          "Keep the original concurrency objective and its failing assertion.",
+      },
+    ];
+    c.recent = Array.from({ length: 12 }, (_, i) => ({
+      id: `action-${i}`,
+      projectId: c.projects[0].id,
+      tool: "research.fetch",
+      status: "SUCCEEDED",
+      outcome: {
+        evidenceExcerpt: 'Already read this source. "quoted"\n'.repeat(1500),
+      },
+    }));
+    const original = structuredClone(c);
+    const normal = fake(c.projects[0].id);
+    const transport: GeminiTransport = {
+      ...normal,
+      generate: async (id, payload, maximum, options) => {
+        expect(transportModule.estimatedInput(payload)).toBeLessThanOrEqual(
+          cfg.env.LLM_MAX_INPUT_TOKENS,
+        );
+        const input = JSON.parse(payload.contents);
+        const sent = (input.originalRequest ?? input).context;
+        expect(sent.projects[0].id).toBe(c.projects[0].id);
+        expect(sent.memories[0].id).toBe("critical-memory");
+        expect(sent.contextWindow.mode).toBe("focused");
+        return normal.generate(id, payload, maximum, options);
+      },
+    };
+    const result = await new routerModule.GeminiRouter(transport).decide(c);
+    expect(result.modelId).toBe("gemini-4-hydrogen");
+    expect(c).toEqual(original);
+    expect(await db.modelRequest.count()).toBeLessThanOrEqual(2);
+  });
+  it("makes no probes or reservations when even required instructions cannot fit", async () => {
+    const cap = cfg.env.LLM_MAX_INPUT_TOKENS;
+    const c = await context();
+    const transport = fake(c.projects[0].id);
+    const metadata = vi.spyOn(transport, "metadata"),
+      generate = vi.spyOn(transport, "generate"),
+      text = vi.spyOn(transport, "text");
+    try {
+      cfg.env.LLM_MAX_INPUT_TOKENS = 1000;
+      await expect(
+        new routerModule.GeminiRouter(transport).decide(c),
+      ).rejects.toThrow("No inference request was sent");
+      expect(metadata).not.toHaveBeenCalled();
+      expect(generate).not.toHaveBeenCalled();
+      expect(text).not.toHaveBeenCalled();
+      expect(await db.modelRequest.count()).toBe(0);
+      expect(await db.budget.count()).toBe(0);
+    } finally {
+      cfg.env.LLM_MAX_INPUT_TOKENS = cap;
+    }
   });
   it("does not escalate missing infrastructure or a single failed action to Hydrogen", async () => {
     const c = await context();
@@ -856,6 +1291,74 @@ describe("Gemini routing and durable free-tier quotas", () => {
     ];
     expect(policy.classifyTask(c).tier).toBe(1);
   });
+  it("increases useful allowance priority near reset without creating tasks", () => {
+    const early = new Date("2026-11-13T10:00:00Z"),
+      late = new Date("2026-11-14T07:50:00Z");
+    expect(
+      policy.hydrogenReviewDue(
+        10,
+        new Date(early.getTime() - 120000),
+        20,
+        early,
+      ),
+    ).toBe(false);
+    expect(
+      policy.hydrogenReviewDue(10, new Date(late.getTime() - 120000), 20, late),
+    ).toBe(true);
+    expect(policy.hydrogenReviewDue(20, undefined, 20, late)).toBe(false);
+  });
+  it("prepares complex work with Lite while preserving the original context for Hydrogen", async () => {
+    await ready();
+    const c = await context(true);
+    c.memories = [{ content: "An important earlier project observation" }];
+    const normal = fake(c.projects[0].id);
+    let prepared = false,
+      retained = false;
+    const transport: GeminiTransport = {
+      ...normal,
+      text: async (id, prompt) => {
+        expect(id).toBe("gemini-3.5-flash-lite");
+        expect(prompt).toContain("important earlier project observation");
+        prepared = true;
+        return {
+          calls: [],
+          text: "Objective: resolve the pending concurrent algorithm. Expected evidence: a passing isolated test.",
+          usage: { input: 30, output: 10, total: 40 },
+        };
+      },
+      generate: async (id, payload, maximum, options) => {
+        const input = JSON.parse(payload.contents);
+        retained =
+          input.originalRequest.context.memories[0].content ===
+          "An important earlier project observation";
+        return normal.generate(id, payload, maximum, options);
+      },
+    };
+    expect(
+      (await new routerModule.GeminiRouter(transport).decide(c)).modelId,
+    ).toBe("gemini-4-hydrogen");
+    expect(prepared && retained).toBe(true);
+    expect(await db.modelRequest.count()).toBe(2);
+  });
+  it("blocks all retired operator-selected models before reserving requests", async () => {
+    const task = policy.classifyTask(await context());
+    for (const id of [
+      "gemini-3.1-flash-lite",
+      "gemini-3.6-flash",
+      "gemini-3-flash-preview",
+      "gemma-4-31b-it",
+    ])
+      await expect(
+        quota.reserveModelRequest({
+          modelId: id,
+          task,
+          estimatedInput: 1,
+          maxOutput: 1,
+          probe: true,
+        }),
+      ).rejects.toThrow("blocked");
+    expect(await db.modelRequest.count()).toBe(0);
+  });
   it("only escalates persistent reasoning failures after strategy intervention", async () => {
     const c = await context();
     c.recent = ["a", "b"].map((id) => ({
@@ -886,8 +1389,8 @@ describe("Gemini routing and durable free-tier quotas", () => {
       return normal.generate(id, transportModule.geminiPayload(c), 2400);
     });
     const result = await new routerModule.GeminiRouter(transport).decide(c);
-    expect(result.modelId).toBe("gemini-3.1-flash-lite");
-    expect(calls).toEqual(["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]);
+    expect(result.modelId).toBe("gemini-3.8-flash");
+    expect(calls).toEqual(["gemini-3.5-flash-lite", "gemini-3.8-flash"]);
     expect(
       await db.modelRequest.count({ where: { status: "RATE_LIMITED" } }),
     ).toBe(1);
@@ -920,7 +1423,7 @@ describe("Gemini routing and durable free-tier quotas", () => {
     });
     const task = policy.classifyTask(await context());
     const attempts = await Promise.allSettled(
-      ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"].map((modelId) =>
+      ["gemini-3.5-flash-lite", "gemini-3.5-flash-lite"].map((modelId) =>
         quota.reserveModelRequest({
           modelId,
           task,
@@ -932,19 +1435,20 @@ describe("Gemini routing and durable free-tier quotas", () => {
     expect(attempts.filter((a) => a.status === "fulfilled")).toHaveLength(1);
     expect(await db.modelRequest.count()).toBe(1);
   });
-  it("reserves advanced daily requests for important work", async () => {
+  it("makes all configured Hydrogen requests available, then blocks daily exhaustion", async () => {
     await ready();
     cfg.env.GEMINI_QUOTAS_JSON = JSON.stringify({
-      models: { "gemini-4-hydrogen": { rpm: 5, tpm: 250000, rpd: 6 } },
+      models: { "gemini-4-hydrogen": { rpm: 30, tpm: 250000, rpd: 20 } },
+      groups: { "generation-project": { rpm: 100, tpm: 250000, rpd: 500 } },
     });
-    const c = await context();
-    const task = policy.classifyTask(c);
-    await quota.reserveModelRequest({
-      modelId: "gemini-4-hydrogen",
-      task,
-      estimatedInput: 1,
-      maxOutput: 1,
-    });
+    const task = policy.classifyTask(await context());
+    for (let i = 0; i < 20; i++)
+      await quota.reserveModelRequest({
+        modelId: "gemini-4-hydrogen",
+        task,
+        estimatedInput: 1,
+        maxOutput: 1,
+      });
     await expect(
       quota.reserveModelRequest({
         modelId: "gemini-4-hydrogen",
@@ -953,14 +1457,7 @@ describe("Gemini routing and durable free-tier quotas", () => {
         maxOutput: 1,
       }),
     ).rejects.toBeInstanceOf(providers.ProviderWaitError);
-    await expect(
-      quota.reserveModelRequest({
-        modelId: "gemini-4-hydrogen",
-        task: { ...task, important: true },
-        estimatedInput: 1,
-        maxOutput: 1,
-      }),
-    ).resolves.toBeDefined();
+    expect(await db.modelRequest.count()).toBe(20);
   });
   it("blocks all inference before transport if free billing status is unconfirmed", async () => {
     const c = await context();
@@ -984,7 +1481,7 @@ describe("Gemini routing and durable free-tier quotas", () => {
     cfg.env.GEMINI_FREE_TIER_PROJECT_CONFIRMED = false;
     await expect(
       sdk.generate(
-        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash-lite",
         transportModule.geminiPayload(c),
         128,
       ),
@@ -1033,11 +1530,19 @@ describe("Gemini routing and durable free-tier quotas", () => {
       new Map(),
       true,
     );
-    expect(summary.some((m) => m.id.startsWith("gemma"))).toBe(true);
+    expect(summary.some((m) => m.id.startsWith("gemma"))).toBe(false);
   });
   it("creates a deduplicated detailed help prompt after advanced structured reasoning fails", async () => {
     await ready();
     const c = await context(true);
+    c.recent = ["a", "b"].map((id) => ({
+      id,
+      projectId: c.projects[0].id,
+      tool: "browser.test",
+      status: "FAILED",
+      outcome: { summary: "Assertion test failed: incorrect algorithm" },
+    }));
+    c.restrictions = [{ projectId: c.projects[0].id, level: 2 }];
     const broken = fake(c.projects[0].id, async () => ({
       calls: [],
       usage: { input: 100, output: 20, total: 120 },
@@ -1061,7 +1566,7 @@ describe("Gemini routing and durable free-tier quotas", () => {
     expect(await db.humanAssistanceRequest.count()).toBe(1);
   });
   it("defers a malformed Lite response until cooldown without requesting human help", async () => {
-    await ready(["gemini-3.1-flash-lite"]);
+    await ready(["gemini-3.5-flash-lite"]);
     const c = await context();
     const broken = fake(c.projects[0].id, async () => ({
       calls: [],
@@ -1076,8 +1581,8 @@ describe("Gemini routing and durable free-tier quotas", () => {
   });
   it("falls back from malformed Lite output to verified Flash without using Hydrogen", async () => {
     await ready([
-      "gemini-3.1-flash-lite",
-      "gemini-3.6-flash",
+      "gemini-3.5-flash-lite",
+      "gemini-3.8-flash",
       "gemini-4-hydrogen",
     ]);
     const c = await context(),
@@ -1087,7 +1592,7 @@ describe("Gemini routing and durable free-tier quotas", () => {
       ...normal,
       generate: async (id, payload, limit, options) => {
         called.push(id);
-        return id === "gemini-3.1-flash-lite"
+        return id === "gemini-3.5-flash-lite"
           ? {
               calls: [],
               finishReason: "MAX_TOKENS",
@@ -1097,8 +1602,8 @@ describe("Gemini routing and durable free-tier quotas", () => {
       },
     };
     const result = await new routerModule.GeminiRouter(transport).decide(c);
-    expect(called).toEqual(["gemini-3.1-flash-lite", "gemini-3.6-flash"]);
-    expect(result.selectionReason).toContain("Flash fallback");
+    expect(called).toEqual(["gemini-3.5-flash-lite", "gemini-3.8-flash"]);
+    expect(result.selectionReason).toContain("Selected Gemini 3.8 Flash");
     expect(
       (await db.modelRequest.findFirstOrThrow({ where: { status: "INVALID" } }))
         .error,
@@ -1107,21 +1612,21 @@ describe("Gemini routing and durable free-tier quotas", () => {
   });
   it("uses a Flash fallback after locally exhausted everyday quota", async () => {
     await ready([
-      "gemini-3.1-flash-lite",
-      "gemini-3.6-flash",
+      "gemini-3.5-flash-lite",
+      "gemini-3.8-flash",
       "gemini-4-hydrogen",
     ]);
     cfg.env.GEMINI_QUOTAS_JSON = JSON.stringify({
-      models: { "gemini-3.1-flash-lite": { rpm: 15, tpm: 250000, rpd: 0 } },
+      models: { "gemini-3.5-flash-lite": { rpm: 15, tpm: 250000, rpd: 0 } },
     });
     const c = await context();
     const result = await new routerModule.GeminiRouter(
       fake(c.projects[0].id),
     ).decide(c);
-    expect(result.modelId).toBe("gemini-3.6-flash");
+    expect(result.modelId).toBe("gemini-3.8-flash");
     expect(await db.modelRequest.count()).toBe(1);
-    expect((await db.modelRequest.findFirstOrThrow()).reason).toContain(
-      "Flash fallback",
+    expect((await db.modelRequest.findFirstOrThrow()).modelId).toBe(
+      "gemini-3.8-flash",
     );
   });
   it("keeps Hydrogen excluded from routine fallback and penalizes recent invalid output", async () => {
@@ -1131,9 +1636,11 @@ describe("Gemini routing and durable free-tier quotas", () => {
       [...catalog.modelCatalog],
       new Map([["gemini-3.5-flash-lite", { successes: 0, failures: 6 }]]),
     );
-    expect(candidates[0].id).toBe("gemini-3.1-flash-lite");
+    expect(candidates[0].id).toBe("gemini-3.5-flash-lite");
     expect(candidates.some((model) => model.tier === 2)).toBe(true);
-    expect(candidates.some((model) => model.tier === 3)).toBe(false);
+    expect(candidates.every((model) => catalog.modelEnabled(model.id))).toBe(
+      true,
+    );
   });
   async function failedSetup(failures = 1) {
     const checkedAt = new Date(Date.now() - 86400000);
@@ -1160,7 +1667,7 @@ describe("Gemini routing and durable free-tier quotas", () => {
           quotaDay: policy.pacificDay(checkedAt),
           budgetDay: checkedAt.toISOString().slice(0, 10),
           status: "FAILED",
-          reason: "Isolated failed setup fixture",
+          reason: "native-action-v2: isolated failed setup fixture",
           createdAt: checkedAt,
         },
       });
@@ -1240,7 +1747,7 @@ describe("Gemini routing and durable free-tier quotas", () => {
     expect(await db.modelRequest.count()).toBe(1);
   });
   it("keeps a previously verified model verified after a temporary metadata failure", async () => {
-    await ready(["gemini-3.1-flash-lite"]);
+    await ready(["gemini-3.5-flash-lite"]);
     const verification = await import("../packages/core/src/gemini/verify");
     const transport: GeminiTransport = {
       ...fake("unused"),
@@ -1250,7 +1757,7 @@ describe("Gemini routing and durable free-tier quotas", () => {
     };
     const [result] = await verification.verifyModels(
       true,
-      ["gemini-3.1-flash-lite"],
+      ["gemini-3.5-flash-lite"],
       transport,
     );
     expect(result.status).toBe("COOLDOWN");
@@ -1419,22 +1926,20 @@ describe("Gemini routing and durable free-tier quotas", () => {
     expect(budget.tokensReserved).toBe(150);
     expect(budget.tokensUsed).toBe(150);
   });
-  it("uses verified Gemma only for opt-in plain text and tracks its actual usage", async () => {
+  it("keeps disabled Gemma excluded even if its old experimental flag is enabled", async () => {
     await ready(["gemma-4-26b-a4b-it"]);
     const c = await context();
-    const prior = cfg.env.GEMINI_EXPERIMENTAL_GEMMA;
+    const previous = cfg.env.GEMINI_EXPERIMENTAL_GEMMA;
     cfg.env.GEMINI_EXPERIMENTAL_GEMMA = true;
     try {
-      const summary = await new routerModule.GeminiRouter(
-        fake(c.projects[0].id),
-      ).summarize("Two project tests passed; customer demand is unvalidated.");
-      expect(summary.modelId).toBe("gemma-4-26b-a4b-it");
-      expect((await db.modelRequest.findFirstOrThrow()).operation).toBe(
-        "summary",
-      );
-      expect((await db.budget.findFirstOrThrow()).tokensUsed).toBe(40);
+      await expect(
+        new routerModule.GeminiRouter(fake(c.projects[0].id)).summarize(
+          "Recorded observations",
+        ),
+      ).rejects.toBeInstanceOf(providers.ProviderWaitError);
+      expect(await db.modelRequest.count()).toBe(0);
     } finally {
-      cfg.env.GEMINI_EXPERIMENTAL_GEMMA = prior;
+      cfg.env.GEMINI_EXPERIMENTAL_GEMMA = previous;
     }
   });
   it("saves a reviewed human reply and reactivates its project without connecting accounts", async () => {
@@ -1523,6 +2028,221 @@ describe("Gemini routing and durable free-tier quotas", () => {
     expect(error.daily).toBe(true);
   });
 });
+describe("Free research providers and isolated browser testing", () => {
+  let prior: {
+    LANGSEARCH_API_KEY: string;
+    FIRECRAWL_API_KEY: string;
+    FIRECRAWL_BROWSER_TESTS_ALLOWED: boolean;
+    FIRECRAWL_MONTHLY_CREDIT_LIMIT: number;
+  };
+  beforeEach(() => {
+    prior = {
+      LANGSEARCH_API_KEY: cfg.env.LANGSEARCH_API_KEY,
+      FIRECRAWL_API_KEY: cfg.env.FIRECRAWL_API_KEY,
+      FIRECRAWL_BROWSER_TESTS_ALLOWED: cfg.env.FIRECRAWL_BROWSER_TESTS_ALLOWED,
+      FIRECRAWL_MONTHLY_CREDIT_LIMIT: cfg.env.FIRECRAWL_MONTHLY_CREDIT_LIMIT,
+    };
+    Object.assign(cfg.env, {
+      LANGSEARCH_API_KEY: "isolated-lang-key",
+      FIRECRAWL_API_KEY: "isolated-fire-key",
+      FIRECRAWL_BROWSER_TESTS_ALLOWED: true,
+      FIRECRAWL_MONTHLY_CREDIT_LIMIT: 900,
+    });
+  });
+  afterEach(() => {
+    Object.assign(cfg.env, prior);
+    vi.unstubAllGlobals();
+  });
+  const free = () => ({
+    success: true,
+    data: {
+      remainingCredits: 1000,
+      planCredits: 1000,
+      billingPeriodStart: "2026-11-13",
+      billingPeriodEnd: "2026-12-13",
+    },
+  });
+  it("uses general web results and settles observed search tokens", async () => {
+    const fetcher = vi.fn(async () =>
+      Response.json({
+        code: 200,
+        data: {
+          webPages: {
+            value: [
+              {
+                name: "Primary source",
+                url: "https://primary.example/report",
+                text: "An observed source excerpt",
+              },
+            ],
+          },
+        },
+        usage: { input_tokens: 5, output_tokens: 20 },
+      }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const { langSearch } = await import(
+      "../packages/core/src/external-research"
+    );
+    expect((await langSearch("maker pricing evidence"))[0].source).toBe(
+      "LangSearch web search",
+    );
+    expect((await db.researchUsage.findFirstOrThrow()).tokens).toBe(25);
+    await expect(langSearch("another query")).rejects.toThrow("five seconds");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("persists provider Retry-After and prevents immediate retries", async () => {
+    const fetcher = vi.fn(async () =>
+      Response.json(
+        { error: "minute limit" },
+        { status: 429, headers: { "Retry-After": "120" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const { langSearch } = await import(
+      "../packages/core/src/external-research"
+    );
+    await expect(langSearch("maker pricing evidence")).rejects.toThrow("429");
+    await expect(langSearch("different query")).rejects.toThrow("cooling down");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("blocks Firecrawl paid plans before any scrape or browser call", async () => {
+    const fetcher = vi.fn(async () =>
+      Response.json({ ...free(), data: { ...free().data, planCredits: 5000 } }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const { firecrawlRead } = await import(
+      "../packages/core/src/external-research"
+    );
+    await expect(firecrawlRead("https://example.com")).rejects.toThrow(
+      "free tier",
+    );
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("requires explicit permission for project-file egress", async () => {
+    cfg.env.FIRECRAWL_BROWSER_TESTS_ALLOWED = false;
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    const { firecrawlBrowserTest } = await import(
+      "../packages/core/src/external-research"
+    );
+    await expect(firecrawlBrowserTest("<h1>Project</h1>")).rejects.toThrow(
+      "operator's permission",
+    );
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("does not mistake screenshots for a functional form test", async () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    const { firecrawlBrowserTest } = await import(
+      "../packages/core/src/external-research"
+    );
+    expect(
+      (await firecrawlBrowserTest("<form><button>Calculate</button></form>"))
+        .code,
+    ).toBe(1);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("cleans up a browser session and rejects success responses containing execution errors", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        calls.push(String(url));
+        return Response.json(
+          String(url).endsWith("credit-usage")
+            ? free()
+            : String(url).endsWith("/interact")
+              ? { success: true, id: "test-session" }
+              : String(url).endsWith("/execute")
+                ? { success: true, error: "Timeout" }
+                : { success: true },
+        );
+      }),
+    );
+    const { firecrawlBrowserTest } = await import(
+      "../packages/core/src/external-research"
+    );
+    await expect(
+      firecrawlBrowserTest("<head></head><h1>Project</h1>"),
+    ).rejects.toThrow("execution failed");
+    expect(calls.at(-1)).toContain("interact/test-session");
+    expect((await db.researchUsage.findFirstOrThrow()).credits).toBe(4);
+  });
+  it("hashes the browser screenshot locally without requiring remote module imports", async () => {
+    let code = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith("credit-usage")) return Response.json(free());
+        if (String(url).endsWith("/interact"))
+          return Response.json({ success: true, id: "test-session" });
+        if (String(url).endsWith("/execute")) {
+          code = JSON.parse(String(init?.body)).code;
+          return Response.json({
+            success: true,
+            stdout: JSON.stringify({
+              benwaBrowser: true,
+              passed: true,
+              assertions: 3,
+              errors: [],
+              screenshotBase64: Buffer.from("fixture image bytes").toString(
+                "base64",
+              ),
+            }),
+          });
+        }
+        return Response.json({ success: true });
+      }),
+    );
+    const { firecrawlBrowserTest } = await import(
+      "../packages/core/src/external-research"
+    );
+    const result = await firecrawlBrowserTest("<h1>Test</h1>");
+    expect(result.code).toBe(0);
+    expect(result.screenshotHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.stdout).not.toContain("screenshotBase64");
+    expect(code).not.toContain("import(");
+    expect(code).not.toContain("isolated-fire-key");
+    expect(code).toContain("policy+html");
+  });
+  it("tracks stage stagnation when new research cannot satisfy testing", async () => {
+    const create = decision();
+    await cycle({
+      name: "stage-fixture",
+      decide: async () => ({ decision: create, tokens: 1 }),
+    });
+    const project = await db.project.findFirstOrThrow();
+    await db.project.update({
+      where: { id: project.id },
+      data: { stage: "TESTING", stagnantAttempts: 0 },
+    });
+    const before = (await db.project.findFirstOrThrow()).progressAt;
+    const happinessBefore = (
+      await db.creatureState.findUniqueOrThrow({ where: { id: "benwa" } })
+    ).mood;
+    await cycle({
+      name: "stage-fixture",
+      decide: async () => ({
+        decision: decision({
+          newProject: null,
+          projectId: project.id,
+          tool: "research.fetch",
+          input: { url: "https://developer.mozilla.org/en-US/docs/Web/HTML" },
+        }),
+        tokens: 1,
+      }),
+    });
+    const after = await db.project.findFirstOrThrow();
+    expect(after.stagnantAttempts).toBe(1);
+    expect(after.progressAt.getTime()).toBe(before.getTime());
+    expect(
+      (await db.creatureState.findUniqueOrThrow({ where: { id: "benwa" } }))
+        .mood,
+    ).toBe(happinessBefore);
+  });
+});
+
 describe("Dashboard snapshot for the house view", () => {
   it("snapshot exposes current cycle, per-project and per-room history, and demo milestones", async () => {
     await db.agentConfiguration.update({
@@ -1571,4 +2291,3 @@ describe("Dashboard snapshot for the house view", () => {
     expect(s.projectHistory[p.id]?.length).toBeGreaterThanOrEqual(1);
   });
 });
-

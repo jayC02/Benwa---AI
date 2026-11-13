@@ -56,3 +56,19 @@ export async function readArtifact(projectId: string, relative: string) {
     throw new Error("Artifact exceeds inspection limit");
   return fs.readFile(file, "utf8");
 }
+export async function workspaceManifest(projectId: string) {
+  const directory = await projectDirectory(projectId);
+  const entries = (await fs.readdir(directory, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
+    .slice(0, 20);
+  return Promise.all(
+    entries.map(async (entry) => {
+      const stat = await fs.stat(await safeFile(projectId, entry.name));
+      return {
+        path: entry.name,
+        bytes: stat.size,
+        modifiedAt: stat.mtime.toISOString(),
+      };
+    }),
+  );
+}

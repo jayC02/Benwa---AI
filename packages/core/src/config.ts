@@ -27,7 +27,25 @@ const Environment = z.object({
     ),
   AGENT_MODE: z.enum(["demo", "real"]).default("demo"),
   AUTONOMY_MODE: z.enum(["supervised", "independent"]).default("supervised"),
-  SEARCH_PROVIDER: z.enum(["public", "brave"]).default("public"),
+  SEARCH_PROVIDER: z.enum(["public", "brave", "langsearch"]).default("public"),
+  LANGSEARCH_API_KEY: z.string().default(""),
+  FIRECRAWL_API_KEY: z.string().default(""),
+  FIRECRAWL_BROWSER_TESTS_ALLOWED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  LANGSEARCH_DAILY_TOKEN_LIMIT: z.coerce
+    .number()
+    .int()
+    .min(1000)
+    .max(10000000)
+    .default(100000),
+  FIRECRAWL_MONTHLY_CREDIT_LIMIT: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(1000)
+    .default(900),
   LLM_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
   LLM_API_KEY: z.string().default(""),
   LLM_MODEL: z.string().default("gpt-4.1-mini"),

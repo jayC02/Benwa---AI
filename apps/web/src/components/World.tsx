@@ -345,7 +345,7 @@ export default function World({
         data-model-state={load}
         data-room={target.room}
         data-activity={target.activity}
-        aria-label={`Benwa, your cream-coloured sprout creature, in the ${room.name.toLowerCase()}, ${words}. Mood ${Math.round(s.creature.mood)}. Energy ${Math.round(s.creature.energy)}.`}
+        aria-label={`Benwa, your cream-coloured sprout creature, in the ${room.name.toLowerCase()}, ${words}. Happiness ${Math.round(s.creature.mood)}.`}
       >
         <div
           className={`thought-bubble ${target.activity}`}
@@ -452,7 +452,7 @@ export default function World({
                     <span className="room-panel-text">
                       {a.outcome?.summary ?? a.intention}
                     </span>
-                    <time>{ago(a.createdAt)}</time>
+                    <time>{ago(a.createdAt, Date.parse(s.serverTime))}</time>
                   </li>
                 );
               })}

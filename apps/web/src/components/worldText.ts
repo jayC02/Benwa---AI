@@ -62,8 +62,8 @@ export function worldInput(
   };
 }
 
-export const ago = (iso: string) => {
-  const minutes = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+export const ago = (iso: string, now = Date.now()) => {
+  const minutes = Math.round((now - new Date(iso).getTime()) / 60000);
   return minutes < 1
     ? "just now"
     : minutes < 60

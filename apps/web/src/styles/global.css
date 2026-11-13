@@ -557,6 +557,124 @@ h1 {
   grid-template-columns: repeat(3, 1fr);
   gap: 20px 25px;
 }
+.progress-panel {
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 22px;
+  margin-bottom: 28px;
+}
+.progress-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+.progress-summary h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+.progress-summary p,
+.progress-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.happiness-stat {
+  width: 230px;
+  flex-shrink: 0;
+}
+.skill-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.skill-card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  background: #f8fafb;
+  border-radius: 12px;
+  padding: 12px;
+}
+.skill-card > div:first-child,
+.happiness-stat > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.skill-card > div > span,
+.happiness-stat > div > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.skill-card svg {
+  color: var(--green);
+  flex-shrink: 0;
+}
+.happiness-stat svg {
+  color: #bc6b84;
+}
+.skill-card strong,
+.happiness-stat strong {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.skill-card small,
+.happiness-stat small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 400;
+  margin-left: 2px;
+}
+.progress-meter {
+  height: 5px;
+  border-radius: 8px;
+  background: #e4ece8;
+  overflow: hidden;
+}
+.progress-meter > span {
+  display: block;
+  height: 100%;
+  background: var(--green);
+}
+.happiness-stat .progress-meter {
+  background: #f3e5eb;
+}
+.happiness-stat .progress-meter > span {
+  background: #bc6b84;
+}
+.progress-note {
+  margin-top: 14px;
+}
+@media (max-width: 900px) {
+  .skill-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 520px) {
+  .progress-panel {
+    padding: 16px;
+  }
+  .progress-summary {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .happiness-stat {
+    width: auto;
+  }
+  .skill-grid {
+    gap: 8px;
+  }
+  .skill-card {
+    padding: 10px;
+  }
+}
 .emotion > div:first-child {
   display: flex;
   gap: 6px;
@@ -2277,7 +2395,84 @@ footer {
     font-size: 9px;
   }
 }
-.model-table-wrap{overflow:auto}.model-table{width:100%;border-collapse:collapse;font-size:11px;text-align:left}.model-table caption{caption-side:top;text-align:left;color:#5e7386;font-size:11px;padding:10px 0 15px}.model-table th,.model-table td{border-bottom:1px solid #e3e9ef;padding:12px 10px;vertical-align:top;min-width:95px}.model-table th:first-child{min-width:210px}.model-table tbody th{font-weight:400}.model-table strong{font-weight:500}.model-table small{display:block;max-width:230px;color:#5e7386;font-size:10px;margin-top:5px}.model-table details{font-size:10px;margin-top:8px}.model-table details p{margin-top:8px}.assistance-item{font-size:12px;border-top:1px solid #e3e9ef;padding:13px 0}.assistance-item p{font-size:11px;color:#5e7386;line-height:1.8;margin:12px 0}.assistance-item pre{font-size:10px;background:#f5f7fa;border:1px solid #e3e9ef;border-radius:6px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:300px;overflow:auto}.settings-form textarea{font:inherit;color:#3f5a71;border:1px solid #dce5ed;padding:12px;border-radius:6px;resize:vertical;min-width:0;width:100%}
+.model-table-wrap {
+  overflow: auto;
+}
+.model-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  text-align: left;
+}
+.model-table caption {
+  caption-side: top;
+  text-align: left;
+  color: #5e7386;
+  font-size: 11px;
+  padding: 10px 0 15px;
+}
+.model-table th,
+.model-table td {
+  border-bottom: 1px solid #e3e9ef;
+  padding: 12px 10px;
+  vertical-align: top;
+  min-width: 95px;
+}
+.model-table th:first-child {
+  min-width: 210px;
+}
+.model-table tbody th {
+  font-weight: 400;
+}
+.model-table strong {
+  font-weight: 500;
+}
+.model-table small {
+  display: block;
+  max-width: 230px;
+  color: #5e7386;
+  font-size: 10px;
+  margin-top: 5px;
+}
+.model-table details {
+  font-size: 10px;
+  margin-top: 8px;
+}
+.model-table details p {
+  margin-top: 8px;
+}
+.assistance-item {
+  font-size: 12px;
+  border-top: 1px solid #e3e9ef;
+  padding: 13px 0;
+}
+.assistance-item p {
+  font-size: 11px;
+  color: #5e7386;
+  line-height: 1.8;
+  margin: 12px 0;
+}
+.assistance-item pre {
+  font-size: 10px;
+  background: #f5f7fa;
+  border: 1px solid #e3e9ef;
+  border-radius: 6px;
+  padding: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 300px;
+  overflow: auto;
+}
+.settings-form textarea {
+  font: inherit;
+  color: #3f5a71;
+  border: 1px solid #dce5ed;
+  padding: 12px;
+  border-radius: 6px;
+  resize: vertical;
+  min-width: 0;
+  width: 100%;
+}
 
 /* ---- Benwa's house (World.tsx) ---- */
 .world {

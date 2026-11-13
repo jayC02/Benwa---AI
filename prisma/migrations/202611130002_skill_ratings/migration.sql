@@ -1,0 +1,1 @@
+ALTER TABLE "CreatureState" ADD COLUMN "skills" JSONB NOT NULL DEFAULT '{}';

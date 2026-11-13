@@ -7,7 +7,8 @@ import {
 import { z } from "zod";
 import { env, json } from "../config.js";
 import { Decision } from "../schema.js";
-import { freeProjectGuard, modelCatalog } from "./catalog.js";
+import { toolInputs } from "../tools.js";
+import { freeProjectGuard, modelCatalog, modelEnabled } from "./catalog.js";
 import { modelRequest, type AgentContext } from "../provider.js";
 export interface Usage {
   input: number;
@@ -98,14 +99,22 @@ export const GeminiDecision = z
       "Must be null when projectId is set. Otherwise provide the complete new project object.",
     ),
     input: z
-      .string()
-      .max(100000)
-      .describe("JSON-encoded input object for the selected execution tool"),
+      .union(Object.values(toolInputs))
+      .describe("Native JSON input object matching the selected tool's schema"),
   })
   .strict();
 export function parseGeminiDecision(value: unknown) {
-  const args = GeminiDecision.parse(value);
-  return Decision.parse({ ...args, input: JSON.parse(args.input) });
+  const legacy = z.record(z.string(), z.unknown()).parse(value);
+  const args = GeminiDecision.parse({
+    ...legacy,
+    input:
+      typeof legacy.input === "string"
+        ? JSON.parse(legacy.input)
+        : legacy.input,
+  });
+  const decision = Decision.parse(args);
+  toolInputs[decision.tool].parse(decision.input);
+  return decision;
 }
 /** Diagnostics contain schema paths/codes, never raw model output or private reasoning. */
 export function decisionFailureReason(error: unknown, response?: Generation) {
@@ -128,7 +137,7 @@ export function geminiPayload(context: AgentContext) {
   return {
     system:
       request.messages[0].content +
-      '\nGemini wire protocol: call choose_action exactly once. Set projectId to an exact ID from context.projects and newProject to null; OR set projectId to null and supply a complete newProject. Never set both or neither. The input field is a JSON-encoded object string: use double-quoted keys/strings and escape nested quotes and line breaks correctly. For example, research.search input is "{\\"query\\":\\"seller pricing problems\\"}". Do not include Markdown fences. All other fields must satisfy the function schema.',
+      '\nGemini wire protocol: call choose_action exactly once. Set projectId to an exact ID from context.projects and newProject to null; OR set projectId to null and supply a complete newProject. Never set both or neither. The input field is a native JSON object matching the selected tool schema, not an encoded string. For example, research.search input is {"query":"seller pricing problems"}. Do not include Markdown fences. All other fields must satisfy the function schema.',
     contents: request.messages[1].content,
     schema: z.toJSONSchema(GeminiDecision, { io: "input" }),
   };
@@ -205,6 +214,7 @@ export class GoogleGeminiTransport implements GeminiTransport {
     freeProjectGuard();
     const reviewed = modelCatalog.find((model) => model.id === modelId);
     if (
+      !modelEnabled(modelId) ||
       !reviewed?.freeStandard ||
       !reviewed.capabilities.includes("structured") ||
       (reviewed.expiresAt && new Date(reviewed.expiresAt) <= new Date())
@@ -259,11 +269,13 @@ export class GoogleGeminiTransport implements GeminiTransport {
   }
   async text(modelId: string, prompt: string, maxOutput: number) {
     freeProjectGuard();
+    if (!modelEnabled(modelId))
+      throw new Error("Model disabled by the operator's active model policy");
     if (
       !modelCatalog.some(
         (model) =>
           model.id === modelId &&
-          model.experimental &&
+          (model.experimental || model.id === "gemini-3.5-flash-lite") &&
           model.freeStandard &&
           model.capabilities.includes("text"),
       )

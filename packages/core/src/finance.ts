@@ -2,6 +2,7 @@ import { z } from "zod";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { db } from "./db.js";
 import { simulate } from "./simulation.js";
+import { applySkillOutcome } from "./skills.js";
 const Transaction = z.object({
   externalId: z.string().min(4).max(200),
   kind: z.enum(["REVENUE", "REFUND", "FEE", "API_COST", "HOSTING", "EXPENSE"]),
@@ -60,7 +61,15 @@ export async function recordTransaction(
       netMinor: net,
       firstSale: first && data.kind === "REVENUE" && netTotal > 0n,
     });
-    await tx.creatureState.update({ where: { id: "benwa" }, data: values });
+    const skills = applySkillOutcome(state.skills, {
+      tool: "financial",
+      progress: net > 0n,
+      failed: net < 0n,
+    });
+    await tx.creatureState.update({
+      where: { id: "benwa" },
+      data: { ...values, skills: skills.ratings },
+    });
     await tx.emotionSnapshot.create({
       data: {
         values: { ...values },

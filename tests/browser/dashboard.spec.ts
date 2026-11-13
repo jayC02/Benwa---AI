@@ -73,11 +73,24 @@ test("dashboard renders, saves boundaries, and navigates at desktop and mobile s
   await expect(
     page.getByRole("img", { name: /Benwa, your cream-coloured sprout/ }),
   ).toBeVisible();
-  await expect(page.getByRole("meter")).toHaveCount(6);
+  await expect(page.getByRole("meter")).toHaveCount(9);
+  await expect(
+    page.getByRole("meter", { name: "Happiness", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("meter", { name: "Energy", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("meter", { name: "Creativity", exact: true }),
+  ).toBeVisible();
   await page
     .getByRole("button", { name: "Pause creature animation", exact: true })
     .waitFor();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(
+    page.getByLabel("Actions between memory checkpoints"),
+  ).toBeVisible();
+  await expect(page.getByLabel("Minimum idle wait in seconds")).toBeVisible();
   const originalInterval = await page
     .getByLabel("Seconds between decisions")
     .inputValue();
@@ -88,6 +101,9 @@ test("dashboard renders, saves boundaries, and navigates at desktop and mobile s
   await page.getByRole("button", { name: "Save boundaries" }).click();
   await page.getByRole("button", { name: "Home", exact: true }).click();
   // Only capture once a frame with Benwa in it has actually been drawn.
+  await page
+    .getByRole("img", { name: /Benwa, your cream-coloured sprout/ })
+    .scrollIntoViewIfNeeded();
   await expect(
     page.getByRole("img", { name: /Benwa, your cream-coloured sprout/ }),
   ).toHaveAttribute("data-model-state", "ready", { timeout: 20000 });
@@ -102,6 +118,47 @@ test("dashboard renders, saves boundaries, and navigates at desktop and mobile s
     ),
   ).toBe(true);
   await page.screenshot({ path: "artifacts/mobile.png", fullPage: true });
+});
+
+test("progress ratings stay above the house and fit desktop and phone screens", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const panel = page.getByRole("region", { name: "Benwa’s progress" });
+  await expect(panel).toBeVisible();
+  for (const name of [
+    "Happiness",
+    "Coding",
+    "Intelligence",
+    "Creativity",
+    "Research",
+    "Testing",
+    "Planning",
+    "Business",
+    "Adaptability",
+  ])
+    await expect(panel.getByRole("meter", { name, exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("meter", { name: "Energy", exact: true }),
+  ).toHaveCount(0);
+  const panelBox = await panel.boundingBox();
+  const houseBox = await page.locator(".world-stage").boundingBox();
+  expect(panelBox!.y + panelBox!.height).toBeLessThan(houseBox!.y);
+  await panel.screenshot({ path: "artifacts/progress-desktop.png" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  expect(
+    await panel
+      .locator(".skill-card")
+      .evaluateAll((cards) =>
+        cards.every((card) => card.scrollWidth <= card.clientWidth),
+      ),
+  ).toBe(true);
+  await panel.screenshot({ path: "artifacts/progress-mobile.png" });
 });
 test("rejects cross-origin control requests and financial fabrication", async ({
   page,
@@ -136,13 +193,11 @@ test("shows honest model quota monitoring without changing the creature view", a
     ),
   ).toBeVisible();
   await expect(page.getByRole("table")).toHaveCount(1);
-  await expect(page.getByRole("row")).toHaveCount(14);
+  await expect(page.getByRole("row")).toHaveCount(4);
   await expect(
     page.getByRole("row").filter({ hasText: "Gemini 4 Hydrogen" }),
-  ).toContainText("Complex tasks only");
-  await expect(
-    page.getByRole("row").filter({ hasText: "Gemma 4 31B" }),
-  ).toContainText(/Experimental summaries disabled|Plain-text summaries only/);
+  ).toContainText("Complex work, strategic reviews and Flash fallback");
+
   await page.setViewportSize({ width: 390, height: 844 });
   expect(
     await page.evaluate(

@@ -2,6 +2,7 @@ import https from "node:https";
 import dns from "node:dns/promises";
 import { z } from "zod";
 import { env } from "./config.js";
+import { langSearch, firecrawlRead } from "./external-research.js";
 
 export function publicIPv4(address: string) {
   if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(address)) return false;
@@ -234,7 +235,7 @@ async function robotsFor(url: URL) {
   }
   throw new Error("robots.txt redirect limit reached");
 }
-export async function fetchPublic(raw: string) {
+async function fetchDirect(raw: string) {
   let url = researchUrl(raw);
   for (let count = 0; count <= 3; count++) {
     if (Date.now() - (lastRequest.get(url.hostname) ?? 0) < 5000)
@@ -266,6 +267,27 @@ export async function fetchPublic(raw: string) {
     };
   }
   throw new Error("Research redirect limit reached");
+}
+export async function fetchPublic(raw: string) {
+  try {
+    const page = await fetchDirect(raw);
+    if (page.text.trim().length >= 80 || !env.FIRECRAWL_API_KEY) return page;
+    await approvedUrl(raw);
+    return firecrawlRead(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (
+      !env.FIRECRAWL_API_KEY ||
+      /robots|private|scope|rate limit|cooling down|HTTP 40[13]|HTTP 429/i.test(
+        message,
+      )
+    )
+      throw error;
+    const { url } = await approvedUrl(raw);
+    if (!robotsAllows(await robotsFor(url), url.pathname + url.search))
+      throw new Error("robots.txt disallows this source");
+    return firecrawlRead(url.toString());
+  }
 }
 export interface SearchResult {
   title: string;
@@ -344,7 +366,9 @@ export async function searchPublic(query: string) {
     );
   lastSearch = Date.now();
   let results: SearchResult[];
-  if (env.SEARCH_PROVIDER === "brave") {
+  if (env.SEARCH_PROVIDER === "langsearch") {
+    results = await langSearch(query);
+  } else if (env.SEARCH_PROVIDER === "brave") {
     if (!env.BRAVE_SEARCH_KEY)
       throw new Error(
         "Selected Brave provider has no key; select the free public provider",

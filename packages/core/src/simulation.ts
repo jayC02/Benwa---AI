@@ -23,6 +23,7 @@ export type EmotionalEvent =
 export const defaultWeights = {
   discovery: 2,
   milestone: 3,
+  failure: -2,
   repetition: -10,
   stagnation: -20,
   firstSale: 15,
@@ -32,7 +33,8 @@ export function simulate(
   event: EmotionalEvent,
   weights = defaultWeights,
 ): Emotions {
-  // Pick only simulated variables: callers may pass a full persisted creature row.
+  // mood is the persisted happiness score. Other fields remain for old snapshots/exports;
+  // they no longer drive behaviour or change with work, waiting or outcomes.
   const state: Emotions = {
     mood: previous.mood,
     energy: previous.energy,
@@ -44,39 +46,21 @@ export function simulate(
   switch (event.kind) {
     case "discovery":
       state.mood += weights.discovery;
-      state.curiosity += 1;
-      state.boredom -= 4;
-      state.confidence += 1;
       break;
     case "milestone":
       state.mood += weights.milestone;
-      state.confidence += 3;
-      state.boredom -= 6;
-      state.frustration -= 3;
       break;
     case "repetition":
       state.mood += weights.repetition;
-      state.boredom += 8;
-      state.frustration += 5;
-      state.confidence -= 2;
       break;
     case "stagnation":
       state.mood += weights.stagnation;
-      state.frustration += 9;
-      state.confidence -= 4;
       break;
     case "failure":
-      state.mood -= 2;
-      state.confidence -= 2;
-      state.frustration += 3;
+      state.mood += weights.failure;
       break;
     case "work":
-      state.energy -= event.effort ?? 4;
-      state.boredom += 0.5;
-      break;
     case "rest":
-      state.energy += Math.min(25, Math.max(0, event.seconds ?? 0) / 6);
-      state.frustration -= Math.min(3, (event.seconds ?? 0) / 60);
       break;
     case "financial": {
       const capped = Number(
@@ -91,27 +75,18 @@ export function simulate(
         Math.min(12, Math.log1p(Math.abs(capped) / 100) * 2);
       state.mood +=
         reward + (event.firstSale && capped > 0 ? weights.firstSale : 0);
-      state.confidence += Math.sign(capped) * 2;
       break;
     }
   }
-  for (const key of Object.keys(state) as (keyof Emotions)[])
-    state[key] = Math.round(Math.max(0, Math.min(100, state[key])) * 10) / 10;
+  state.mood = Math.round(Math.max(0, Math.min(100, state.mood)) * 10) / 10;
   return state;
 }
 export function emotionalGuidance(s: Emotions): string[] {
   return [
-    s.energy < 25
-      ? "Use light work or rest; infrastructure remains available."
-      : "Energy supports focused work.",
+    "Happiness is outcome feedback: verified useful progress is positive, failed or repetitive actions are negative, and routine work or waiting is neutral. It is not a need for sleep or a permission to bypass rules.",
     s.mood < 35
-      ? "Review failure evidence and reconsider assumptions."
-      : "Pursue measured progress.",
-    s.confidence < 35
-      ? "Prefer small inexpensive validation experiments."
-      : "Keep confidence tied to evidence.",
-    s.boredom > 65 || s.frustration > 65
-      ? "Change assumptions or investigate a different approach."
-      : "Continue only while outcomes are useful.",
+      ? "Recent outcomes have been poor. Review the concrete failure feedback, change approach and try a small useful test. Continue working; low happiness is not a reason to stop."
+      : "Use the feedback on recent actions to repeat useful methods and avoid unsuccessful ones. Keep testing assumptions against evidence.",
+    "Do not create easy filler actions to raise happiness. Useful failed experiments can inform the next approach; never hide or fabricate failures. Wait only when no productive work is available.",
   ];
 }
