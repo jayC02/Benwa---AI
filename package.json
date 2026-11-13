@@ -1,0 +1,63 @@
+{
+  "name": "benwa-lab",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "tsx scripts/dev.ts",
+    "phone": "tsx scripts/phone.ts",
+    "phone:stop": "tsx scripts/phone.ts stop",
+    "dev:web": "npm run dev -w @benwa/web",
+    "worker": "tsx apps/worker/src/main.ts",
+    "supervisor": "tsx apps/worker/src/supervisor.ts",
+    "state": "tsx scripts/state.ts",
+    "deploy:prepare": "tsx scripts/prepare-deployment.ts",
+    "deploy:verify": "tsx scripts/verify-hosting.ts",
+    "models:verify": "tsx scripts/models.ts",
+    "db:local": "tsx scripts/database.ts",
+    "db:migrate": "prisma migrate deploy",
+    "db:generate": "prisma generate",
+    "db:seed": "tsx scripts/seed.ts",
+    "build": "npm run db:generate && npm run build -w @benwa/web",
+    "start": "node --env-file-if-exists=.env apps/web/dist/server/entry.mjs",
+    "typecheck": "tsc --noEmit && npm exec -w @benwa/web -- astro check",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "smoke:real": "tsx scripts/smoke.ts",
+    "test:integration": "vitest run tests/integration.test.ts"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.16",
+    "@electric-sql/pglite-socket": "0.2.19",
+    "@google/genai": "3.3.0",
+    "@prisma/client": "6.19.3",
+    "dotenv": "16.6.1",
+    "pg": "8.16.3",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.5",
+    "@playwright/test": "1.56.1",
+    "@types/node": "24.10.0",
+    "@types/pg": "8.15.6",
+    "@types/three": "^0.180.0",
+    "eslint": "9.39.1",
+    "prettier": "3.6.2",
+    "prisma": "6.19.3",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.46.4",
+    "vitest": "5.1.0"
+  },
+  "overrides": {
+    "deepmerge-ts": "8.0.2",
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.1"
+    }
+  }
+}

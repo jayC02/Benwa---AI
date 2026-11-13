@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: benwa
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-benwa-local-only}
+      POSTGRES_DB: benwa
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U benwa -d benwa"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+  web:
+    profiles: ["app"]
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://benwa:${POSTGRES_PASSWORD:-benwa-local-only}@postgres:5432/benwa
+      HOST: 0.0.0.0
+    ports: ["127.0.0.1:4321:4321"]
+    volumes: ["projects:/app/.data/projects"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+  worker:
+    profiles: ["app"]
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://benwa:${POSTGRES_PASSWORD:-benwa-local-only}@postgres:5432/benwa
+    command: ["node", "--import", "tsx", "apps/worker/src/main.ts"]
+    volumes: ["projects:/app/.data/projects"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+  supervisor:
+    profiles: ["app"]
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://benwa:${POSTGRES_PASSWORD:-benwa-local-only}@postgres:5432/benwa
+    command: ["node", "--import", "tsx", "apps/worker/src/supervisor.ts"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+volumes:
+  postgres-data:
+  projects:

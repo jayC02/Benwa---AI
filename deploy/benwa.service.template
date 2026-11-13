@@ -1,0 +1,29 @@
+[Unit]
+Description=Benwa @COMPONENT@
+Requires=benwa-db.service
+After=network-online.target benwa-db.service
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=benwa
+Group=benwa
+WorkingDirectory=/opt/benwa
+EnvironmentFile=/etc/benwa/runtime.env
+ExecStart=/usr/local/bin/node @ENTRYPOINT@
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+KillMode=mixed
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/benwa
+
+[Install]
+WantedBy=multi-user.target

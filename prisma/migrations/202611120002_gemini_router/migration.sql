@@ -1,0 +1,14 @@
+ALTER TABLE "AgentCycle" ADD COLUMN "modelId" TEXT, ADD COLUMN "selectionReason" TEXT;
+CREATE TABLE "ModelAccess" ("scope" TEXT NOT NULL,"modelId" TEXT NOT NULL,"credentialFingerprint" TEXT NOT NULL,"status" TEXT NOT NULL DEFAULT 'UNVERIFIED',"capabilities" JSONB NOT NULL,"metadataAt" TIMESTAMP(3),"verifiedAt" TIMESTAMP(3),"error" TEXT,PRIMARY KEY("scope","modelId"));
+CREATE TABLE "ModelRequest" ("id" TEXT PRIMARY KEY,"scope" TEXT NOT NULL,"modelId" TEXT NOT NULL,"quotaDay" TEXT NOT NULL,"operation" TEXT NOT NULL,"tier" INTEGER NOT NULL,"estimatedInput" INTEGER NOT NULL,"reservedTokens" INTEGER NOT NULL,"inputTokens" INTEGER,"outputTokens" INTEGER,"totalTokens" INTEGER,"budgetDay" TEXT NOT NULL,"status" TEXT NOT NULL DEFAULT 'RESERVED',"reason" TEXT NOT NULL,"error" TEXT,"cycleId" TEXT,"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,"completedAt" TIMESTAMP(3),FOREIGN KEY("cycleId") REFERENCES "AgentCycle"("id") ON DELETE SET NULL ON UPDATE CASCADE,CONSTRAINT "nonnegative_model_usage" CHECK ("estimatedInput">=0 AND "reservedTokens">=0 AND ("inputTokens" IS NULL OR "inputTokens">=0) AND ("outputTokens" IS NULL OR "outputTokens">=0)));
+CREATE INDEX "ModelRequest_scope_modelId_quotaDay_idx" ON "ModelRequest"("scope","modelId","quotaDay");
+ALTER TABLE "ModelRequest" ADD COLUMN "projectId" TEXT, ADD COLUMN "issueKey" TEXT;
+CREATE INDEX "ModelRequest_scope_createdAt_idx" ON "ModelRequest"("scope","createdAt");
+CREATE INDEX "ModelRequest_cycleId_idx" ON "ModelRequest"("cycleId");
+CREATE TABLE "ModelCooldown" ("scope" TEXT NOT NULL,"key" TEXT NOT NULL,"until" TIMESTAMP(3) NOT NULL,"reason" TEXT NOT NULL,"failures" INTEGER NOT NULL DEFAULT 1,PRIMARY KEY("scope","key"));
+CREATE TABLE "HumanAssistanceRequest" ("id" TEXT PRIMARY KEY,"issueKey" TEXT NOT NULL UNIQUE,"projectId" TEXT NOT NULL,"title" TEXT NOT NULL,"prompt" TEXT NOT NULL,"status" TEXT NOT NULL DEFAULT 'OPEN',"response" TEXT,"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,"resolvedAt" TIMESTAMP(3));
+CREATE INDEX "HumanAssistanceRequest_status_createdAt_idx" ON "HumanAssistanceRequest"("status","createdAt");
+ALTER TABLE "ModelAccess" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "ModelRequest" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "ModelCooldown" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "HumanAssistanceRequest" ENABLE ROW LEVEL SECURITY;

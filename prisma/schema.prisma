@@ -1,0 +1,314 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+}
+
+model CreatureState {
+  id String @id @default("benwa")
+  name String @default("Benwa")
+  status String @default("PAUSED")
+  activity String @default("Waiting to begin")
+  thought String @default("A small idea could become something useful.")
+  mood Float @default(62)
+  energy Float @default(85)
+  curiosity Float @default(78)
+  boredom Float @default(12)
+  confidence Float @default(50)
+  frustration Float @default(5)
+  heartbeat DateTime?
+  restUntil DateTime?
+  restStartedAt DateTime?
+  activeCycles Int @default(0)
+  updatedAt DateTime @updatedAt
+}
+model EmotionSnapshot {
+  id String @id @default(cuid())
+  values Json
+  event String
+  actionId String? @unique
+  createdAt DateTime @default(now())
+  @@index([createdAt])
+}
+model AgentConfiguration {
+  id String @id @default("main")
+  mode String @default("demo")
+  cycleSeconds Int @default(25)
+  maxSteps Int @default(40)
+  restSeconds Int @default(120)
+  dailyTokenLimit Int @default(80000)
+  maxProjects Int @default(3)
+  rewardWeights Json @default("{\"discovery\":2,\"milestone\":3,\"repetition\":-10,\"stagnation\":-20,\"firstSale\":15}")
+  updatedAt DateTime @updatedAt
+}
+model Budget {
+  id String @id @default(cuid())
+  day String @unique
+  tokensReserved Int @default(0)
+  tokensUsed Int @default(0)
+  calls Int @default(0)
+  authorisedMinor BigInt @default(0)
+  spentMinor BigInt @default(0)
+  currency String @default("GBP")
+}
+model Goal {
+  id String @id @default(cuid())
+  title String
+  status String @default("ACTIVE")
+  projectId String
+  project Project @relation(fields:[projectId],references:[id])
+  actions Action[]
+  createdAt DateTime @default(now())
+}
+model Project {
+  id String @id @default(cuid())
+  name String
+  description String
+  stage String @default("DISCOVERY")
+  status String @default("ACTIVE")
+  score Float @default(0)
+  hypothesis Json
+  verifiedMilestones Int @default(0)
+  stagnantAttempts Int @default(0)
+  progressAt DateTime @default(now())
+  stageChangedAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  goals Goal[]
+  tasks Task[]
+  actions Action[]
+  milestones ProjectMilestone[]
+  experiments Experiment[]
+  opportunities Opportunity[]
+}
+model ProjectMilestone {
+  id String @id @default(cuid())
+  projectId String
+  project Project @relation(fields:[projectId],references:[id])
+  stage String
+  evidenceActionId String @unique
+  evidenceAction Action @relation(fields:[evidenceActionId],references:[id])
+  createdAt DateTime @default(now())
+  @@unique([projectId,stage])
+}
+model Task {
+  id String @id @default(cuid())
+  projectId String
+  project Project @relation(fields:[projectId],references:[id])
+  title String
+  status String @default("PENDING")
+  dependsOnId String?
+  dependsOn Task? @relation("dependencies",fields:[dependsOnId],references:[id])
+  dependents Task[] @relation("dependencies")
+  stage String
+  @@index([projectId,status])
+}
+model AgentCycle {
+  id String @id @default(cuid())
+  jobId String @unique
+  stage String @default("DECIDING")
+  provider String
+  decision Json?
+  error String?
+  tokens Int @default(0)
+  reservation Int @default(0)
+  action Action?
+  modelId String?
+  selectionReason String?
+  modelRequests ModelRequest[]
+  createdAt DateTime @default(now())
+  completedAt DateTime?
+}
+
+model ModelAccess {
+  scope String
+  modelId String
+  credentialFingerprint String
+  status String @default("UNVERIFIED")
+  capabilities Json
+  metadataAt DateTime?
+  verifiedAt DateTime?
+  error String?
+  @@id([scope,modelId])
+}
+model ModelRequest {
+  id String @id @default(cuid())
+  scope String
+  modelId String
+  quotaDay String
+  operation String
+  tier Int
+  estimatedInput Int
+  reservedTokens Int
+  inputTokens Int?
+  outputTokens Int?
+  totalTokens Int?
+  budgetDay String
+  status String @default("RESERVED")
+  reason String
+  error String?
+  cycleId String?
+  projectId String?
+  issueKey String?
+  cycle AgentCycle? @relation(fields:[cycleId],references:[id])
+  createdAt DateTime @default(now())
+  completedAt DateTime?
+  @@index([scope,modelId,quotaDay])
+  @@index([scope,createdAt])
+  @@index([cycleId])
+}
+model ModelCooldown {
+  scope String
+  key String
+  until DateTime
+  reason String
+  failures Int @default(1)
+  @@id([scope,key])
+}
+model HumanAssistanceRequest {
+  id String @id @default(cuid())
+  issueKey String @unique
+  projectId String
+  title String
+  prompt String
+  status String @default("OPEN")
+  response String?
+  createdAt DateTime @default(now())
+  resolvedAt DateTime?
+  @@index([status,createdAt])
+}
+model Action {
+  id String @id @default(cuid())
+  cycleId String @unique
+  cycle AgentCycle @relation(fields:[cycleId],references:[id])
+  projectId String
+  project Project @relation(fields:[projectId],references:[id])
+  goalId String
+  goal Goal @relation(fields:[goalId],references:[id])
+  category String
+  target String
+  intention String
+  rationale String
+  strategy String
+  tool String
+  input Json
+  expectedEvidence String
+  costEstimateMinor BigInt @default(0)
+  permissions Json
+  fingerprint String
+  status String @default("PLANNED")
+  createdAt DateTime @default(now())
+  completedAt DateTime?
+  executions ToolExecution[]
+  outcome ActionOutcome?
+  milestone ProjectMilestone?
+  approval ApprovalRequest?
+  @@index([projectId,createdAt])
+  @@index([fingerprint])
+}
+model ToolExecution {
+  id String @id @default(cuid())
+  actionId String
+  action Action @relation(fields:[actionId],references:[id])
+  status String @default("RUNNING")
+  input Json
+  output Json?
+  error String?
+  startedAt DateTime @default(now())
+  completedAt DateTime?
+}
+model ActionOutcome {
+  id String @id @default(cuid())
+  actionId String @unique
+  action Action @relation(fields:[actionId],references:[id])
+  verified Boolean
+  meaningful Boolean
+  simulated Boolean @default(false)
+  summary String
+  evidence Json
+  evidenceHash String?
+  createdAt DateTime @default(now())
+  @@index([evidenceHash])
+}
+model Memory {
+  id String @id @default(cuid())
+  category String
+  projectId String?
+  content String
+  sourceActionId String?
+  verified Boolean @default(false)
+  simulated Boolean @default(false)
+  importance Float @default(0.5)
+  supersedesId String?
+  createdAt DateTime @default(now())
+  @@index([projectId,category,createdAt])
+}
+model Opportunity {
+  id String @id @default(cuid())
+  projectId String
+  project Project @relation(fields:[projectId],references:[id])
+  assessment Json
+  evidence Json
+  createdAt DateTime @default(now())
+}
+model Experiment {
+  id String @id @default(cuid())
+  projectId String
+  project Project @relation(fields:[projectId],references:[id])
+  hypothesis String
+  successCriterion String
+  result String?
+  status String @default("PLANNED")
+  createdAt DateTime @default(now())
+}
+model FinancialTransaction {
+  id String @id @default(cuid())
+  externalId String @unique
+  kind String
+  amountMinor BigInt
+  currency String
+  source String
+  evidence Json
+  projectId String?
+  createdAt DateTime @default(now())
+  @@index([currency,kind])
+}
+model SupervisorIntervention {
+  id String @id @default(cuid())
+  projectId String?
+  actionId String?
+  level Int
+  reason String
+  blockedFingerprint String?
+  blockedStrategy String?
+  expiresAt DateTime?
+  resolvedAt DateTime?
+  createdAt DateTime @default(now())
+  @@index([projectId,resolvedAt])
+}
+model ApprovalRequest {
+  id String @id @default(cuid())
+  actionId String @unique
+  action Action @relation(fields:[actionId],references:[id])
+  kind String
+  description String
+  status String @default("PENDING")
+  reviewedAt DateTime?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+model ScheduledJob {
+  id String @id @default(cuid())
+  key String @unique
+  status String @default("PENDING")
+  runAt DateTime @default(now())
+  leaseUntil DateTime?
+  leaseToken String?
+  attempts Int @default(0)
+  generation Int @default(0)
+  error String?
+  createdAt DateTime @default(now())
+  @@index([status,runAt])
+}

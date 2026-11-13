@@ -1,0 +1,26 @@
+{
+  "name": "@benwa/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev --host 127.0.0.1",
+    "build": "astro build"
+  },
+  "dependencies": {
+    "@astrojs/node": "11.1.12",
+    "@astrojs/react": "7.1.8",
+    "@benwa/core": "0.1.0",
+    "@tailwindcss/vite": "4.1.17",
+    "astro": "7.4.11",
+    "lucide-react": "0.468.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "tailwindcss": "4.1.17",
+    "three": "0.180.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.2"
+  }
+}

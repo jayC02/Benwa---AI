@@ -1,0 +1,15 @@
+[Unit]
+Description=Benwa private PostgreSQL
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/benwa
+ExecStart=/usr/bin/docker compose -p benwa -f deploy/postgres.compose.yaml up -d --wait
+ExecStop=/usr/bin/docker compose -p benwa -f deploy/postgres.compose.yaml stop
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

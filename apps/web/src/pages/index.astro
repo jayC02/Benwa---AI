@@ -1,0 +1,8 @@
+---
+import Dashboard from '../components/Dashboard';
+import '../styles/global.css';
+import { snapshot } from '../server/snapshot';
+import { json } from '@benwa/core';
+const initial=JSON.parse(json(await snapshot()));
+---
+<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><meta name="description" content="A small digital entrepreneur. Follow Benwa's experiments, evidence and everyday discoveries."/><meta name="theme-color" content="#edf2f7"/><title>Benwa · A little work in progress</title><link rel="icon" type="image/svg+xml" href="/favicon.svg"/></head><body><Dashboard initial={initial} client:load/></body></html>
